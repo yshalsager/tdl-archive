@@ -62,7 +62,11 @@ func (m *mediaMapper) media(id int, msg tg.NotEmptyMessage, raw tg.MessageMediaC
 			counts[string(result.Option)] = result
 		}
 		options := make([]map[string]any, 0, len(value.Poll.Answers))
-		for _, answer := range value.Poll.Answers {
+		for _, rawAnswer := range value.Poll.Answers {
+			answer, ok := rawAnswer.(*tg.PollAnswer)
+			if !ok {
+				continue
+			}
 			result, found := counts[string(answer.Option)]
 			count, correct := 0, false
 			if found {
