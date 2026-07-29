@@ -16,10 +16,20 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
-      - run: mise run lint
+      - run: golangci-lint run
+        env:
+          GOMAXPROCS: ''
   build-and-test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
-      - run: mise run build
+      - run: go test ./...
+        env:
+          GOMAXPROCS: ''
+      - run: go vet ./...
+        env:
+          GOMAXPROCS: ''
+      - run: go build -trimpath -o dist/tdl-archive .
+        env:
+          GOMAXPROCS: ''
