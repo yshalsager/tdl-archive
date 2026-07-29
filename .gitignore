@@ -1,0 +1,7 @@
+/tdl-archive
+/dist/
+/config.yaml
+/data.sqlite
+/data.sqlite-*
+/media/
+/.DS_Store

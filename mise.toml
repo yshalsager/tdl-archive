@@ -1,0 +1,26 @@
+[tools]
+go = '1.25.8'
+goreleaser = '2.17.1'
+
+[env]
+GOMAXPROCS = '2'
+
+[tasks.test]
+description = 'Run tests and vet'
+run = ['go test -p 2 ./...', 'go vet -p 2 ./...']
+
+[tasks.build]
+description = 'Build the local tdl-archive executable'
+depends = ['test']
+run = 'go build -p 2 -trimpath -o dist/tdl-archive .'
+
+[tasks.'release:snapshot']
+description = 'Build release archives without publishing'
+depends = ['test']
+run = 'goreleaser release --snapshot --clean --parallelism 2'
+
+[tasks.release]
+description = 'Publish the current Git tag to GitHub Releases'
+depends = ['test']
+confirm = 'Publish the current Git tag?'
+run = 'goreleaser release --clean --parallelism 2'

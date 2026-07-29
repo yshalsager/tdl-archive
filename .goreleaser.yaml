@@ -1,0 +1,37 @@
+version: 2
+
+project_name: tdl-archive
+
+builds:
+  - binary: tdl-archive
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - files:
+      - LICENSE
+      - README.md
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+
+checksum:
+  name_template: checksums.txt
+
+release:
+  github:
+    owner: yshalsager
+    name: tdl-archive
+
+changelog:
+  sort: asc
