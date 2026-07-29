@@ -13,6 +13,7 @@ import (
 	"github.com/gotd/td/tg"
 	"github.com/iyear/tdl/core/dcpool"
 	coredownloader "github.com/iyear/tdl/core/downloader"
+	coretakeout "github.com/iyear/tdl/core/middlewares/takeout"
 	"github.com/iyear/tdl/core/tclient"
 	"github.com/iyear/tdl/core/tmedia"
 	"github.com/iyear/tdl/extension"
@@ -24,6 +25,7 @@ type mediaMapper struct {
 	cfg       config
 	overwrite bool
 	pool      dcpool.Pool
+	takeoutID int64
 }
 
 func (m *mediaMapper) close() {
@@ -137,14 +139,15 @@ func (m *mediaMapper) allowed(raw tg.MessageMediaClass) bool {
 
 func (m *mediaMapper) download(file *tmedia.Media, path string) error {
 	if m.pool == nil {
-		m.pool = dcpool.NewPool(m.ext.Client(), m.ext.Config().Pool, tclient.NewDefaultMiddlewares(m.ctx, 0)...)
+		middlewares := tclient.NewDefaultMiddlewares(m.ctx, 0)
+		if m.takeoutID != 0 {
+			middlewares = append(middlewares, coretakeout.Middleware(m.takeoutID))
+		}
+		m.pool = dcpool.NewPool(m.ext.Client(), m.ext.Config().Pool, middlewares...)
 	}
 	tmp := path + ".tmp"
 	_ = os.Remove(tmp)
 	client := m.pool.Client(m.ctx, file.DC)
-	if m.cfg.UseTakeout {
-		client = m.pool.Takeout(m.ctx, file.DC)
-	}
 	_, err := gotddownloader.NewDownloader().WithPartSize(coredownloader.MaxPartSize).Download(client, file.InputFileLoc).WithThreads(4).ToPath(m.ctx, tmp)
 	if err != nil {
 		_ = os.Remove(tmp)

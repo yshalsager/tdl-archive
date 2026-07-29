@@ -27,7 +27,9 @@ func run(ctx context.Context, ext *extension.Extension, args []string) error {
 	downloadMedia := flags.Bool("download-media", false, "download attached media")
 	mediaDir := flags.String("media-dir", "", "media directory (default: media)")
 	mediaTypes := flags.String("media-type", "", "comma-separated MIME types to download")
+	fetchBatchSize := flags.Int("fetch-batch-size", 100, "messages to process per checkpoint")
 	fetchLimit := flags.Int("fetch-limit", 0, "maximum messages to sync; zero means unlimited")
+	useTakeout := flags.Bool("takeout", false, "use Telegram's takeout API for bulk exports")
 	dryRun := flags.Bool("dry-run", false, "show how many messages would be synced without writing")
 	jsonDump := flags.Bool("json-dump", false, "store raw Telegram JSON")
 	sel := selection{}
@@ -47,21 +49,24 @@ func run(ctx context.Context, ext *extension.Extension, args []string) error {
 	if err := sel.validate(); err != nil {
 		return err
 	}
+	if *fetchBatchSize < 1 {
+		return fmt.Errorf("--fetch-batch-size must be positive")
+	}
 	if *fetchLimit < 0 {
 		return fmt.Errorf("--fetch-limit must be non-negative")
 	}
 	var cfg config
 	var err error
 	if *chat == "" {
-		if *downloadMedia || *mediaDir != "" || *mediaTypes != "" || *fetchLimit != 0 {
-			return fmt.Errorf("--download-media, --media-dir, --media-type, and --fetch-limit require --chat")
+		if *downloadMedia || *mediaDir != "" || *mediaTypes != "" || *fetchBatchSize != 100 || *fetchLimit != 0 || *useTakeout {
+			return fmt.Errorf("native sync options require --chat")
 		}
 		cfg, err = loadConfig(*configPath)
 		if err != nil {
 			return fmt.Errorf("load config: %w", err)
 		}
 	} else {
-		cfg = config{Group: *chat, MediaDir: "media", DownloadMedia: *downloadMedia, FetchBatchSize: 100, FetchLimit: *fetchLimit}
+		cfg = config{Group: *chat, MediaDir: "media", DownloadMedia: *downloadMedia, FetchBatchSize: *fetchBatchSize, FetchLimit: *fetchLimit, UseTakeout: *useTakeout}
 		if *mediaDir != "" {
 			cfg.MediaDir = *mediaDir
 		}

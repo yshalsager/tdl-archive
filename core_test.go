@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gotd/td/bin"
+	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/message/peer"
 	"github.com/gotd/td/telegram/query/messages"
 	"github.com/gotd/td/tg"
@@ -17,6 +19,9 @@ import (
 func TestSelectionAndStore(t *testing.T) {
 	if err := run(context.Background(), nil, []string{"sync", "--media-dir", "media"}); err == nil || !strings.Contains(err.Error(), "require --chat") {
 		t.Fatalf("native option without chat: %v", err)
+	}
+	if err := run(context.Background(), nil, []string{"sync", "--chat", "group", "--fetch-batch-size", "0"}); err == nil || !strings.Contains(err.Error(), "must be positive") {
+		t.Fatalf("invalid native batch size: %v", err)
 	}
 	normalized := normalizeListFlags([]string{"--id", "1", "2", "--filter", "true"})
 	if len(normalized) != 4 || normalized[1] != "1,2" {
@@ -160,5 +165,25 @@ func TestSelectionAndStore(t *testing.T) {
 	collected, err = (&synchronizer{}).collectThreadIDs(context.Background(), threadQuery, &tg.InputPeerChannel{ChannelID: 1}, []int{7, 3}, nil)
 	if err != nil || threadCalls != 2 || len(collected) != 2 || collected[0].Msg.GetID() != 3 || collected[1].Msg.GetID() != 7 {
 		t.Fatalf("thread exact IDs: ids=%v calls=%d err=%v", collected, threadCalls, err)
+	}
+	rangeWrapped := false
+	rawInvoker := telegram.InvokeFunc(func(_ context.Context, input bin.Encoder, _ bin.Decoder) error {
+		request, ok := input.(*tg.InvokeWithMessagesRangeRequest)
+		rangeWrapped = ok && request.Range.MinID == 10 && request.Range.MaxID == 20
+		return nil
+	})
+	if err := (messageRangeInvoker{raw: rawInvoker, messageRange: tg.MessageRange{MinID: 10, MaxID: 20}}).Invoke(
+		context.Background(), &tg.MessagesGetHistoryRequest{}, &tg.MessagesMessages{},
+	); err != nil || !rangeWrapped {
+		t.Fatalf("takeout message range: wrapped=%v err=%v", rangeWrapped, err)
+	}
+	unique := uniqueElements([]messages.Elem{{Msg: &tg.Message{ID: 2}}, {Msg: &tg.Message{ID: 1}}, {Msg: &tg.Message{ID: 2}}})
+	if len(unique) != 2 || unique[0].Msg.GetID() != 1 || unique[1].Msg.GetID() != 2 {
+		t.Fatalf("takeout range deduplication: %v", unique)
+	}
+	public := &tg.Channel{}
+	public.SetUsernames([]tg.Username{{Username: "public", Active: true}})
+	if !isPublicChannel(public) || isPublicChannel(&tg.Channel{}) {
+		t.Fatal("takeout public channel detection failed")
 	}
 }

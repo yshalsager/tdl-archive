@@ -39,6 +39,7 @@ Raw Telegram JSON is disabled by default. Add `json_dump: true` to the config or
 tdl archive sync --chat @group
 tdl archive sync --chat @group --download-media --media-dir media
 tdl archive sync --chat @group --download-media --media-type image/jpeg,video/mp4
+tdl archive sync --chat @group --fetch-batch-size 500 --takeout
 
 # tg-archive compatibility configuration.
 tdl archive sync --config config.yaml
@@ -73,7 +74,9 @@ Options:
 - `--download-media`: download attached media in native mode
 - `--media-dir`: media directory in native mode, default `media`
 - `--media-type`: comma-separated MIME types to download in native mode
+- `--fetch-batch-size`: messages processed per database checkpoint in native mode, default `100`; Telegram requests remain capped at `100`
 - `--fetch-limit`: maximum messages to sync in native mode; zero means unlimited
+- `--takeout`: use Telegram's takeout API for bulk exports in native mode
 - `--dry-run`: report how many messages would be synced without writing the database or downloading media
 - `--id`: exact IDs; repeat, comma-separate, or space-separate them
 - `--from-id`: inclusive lower ID
@@ -83,6 +86,8 @@ Options:
 - `--json-dump`: store raw Telegram JSON
 
 Primary selectors are mutually exclusive. Explicit selectors upsert every selected message and atomically replace existing media. They do not move the normal incremental cursor.
+
+Takeout mode may require approving Telegram's export request or waiting for the delay reported by Telegram. The sync fails rather than silently falling back to standard mode.
 
 The extension writes the existing `messages`, `users`, and `media` tables without changing their public shape. Its only private table is `sync_state`. Existing databases missing `messages.json_dump` are migrated automatically; the column stays null unless enabled.
 

@@ -22,16 +22,21 @@ import (
 )
 
 type synchronizer struct {
-	ext   *extension.Extension
-	cfg   config
-	store *store
+	ext       *extension.Extension
+	cfg       config
+	store     *store
+	api       *tg.Client
+	takeout   tg.Invoker
+	ranges    []tg.MessageRange
+	takeoutID int64
 }
 
 const telegramBatchSize = 100
 
 func (s *synchronizer) run(ctx context.Context, sel selection) (int, error) {
-	manager := peers.Options{}.Build(s.ext.Client().API())
-	dialogPeer, err := s.loadDialogs(ctx, manager)
+	api := s.ext.Client().API()
+	manager := peers.Options{}.Build(api)
+	dialogPeer, err := s.loadDialogs(ctx, manager, api)
 	if err != nil {
 		return 0, fmt.Errorf("load dialogs: %w", err)
 	}
@@ -44,6 +49,15 @@ func (s *synchronizer) run(ctx context.Context, sel selection) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("resolve group: %w", err)
 	}
+	if !s.cfg.UseTakeout {
+		s.api = api
+		return s.sync(ctx, sel, p)
+	}
+	return s.runTakeout(ctx, sel, p)
+}
+
+func (s *synchronizer) sync(ctx context.Context, sel selection, p peers.Peer) (int, error) {
+	var err error
 	baseScope := strconv.FormatInt(p.ID(), 10)
 	scope := baseScope
 	if sel.Topic > 0 {
@@ -70,7 +84,7 @@ func (s *synchronizer) run(ctx context.Context, sel selection) (int, error) {
 		}
 	}
 
-	mapper := mediaMapper{ctx: ctx, ext: s.ext, cfg: s.cfg, overwrite: sel.Explicit}
+	mapper := mediaMapper{ctx: ctx, ext: s.ext, cfg: s.cfg, overwrite: sel.Explicit, takeoutID: s.takeoutID}
 	defer mapper.close()
 	total := 0
 	for {
@@ -122,20 +136,20 @@ func (s *synchronizer) run(ctx context.Context, sel selection) (int, error) {
 	}
 }
 
-func (s *synchronizer) collect(ctx context.Context, inputPeer tg.InputPeerClass, sel selection, cursor int, program *vm.Program, limit int) ([]qmessages.Elem, int, error) {
+func (s *synchronizer) collectFrom(ctx context.Context, api *tg.Client, inputPeer tg.InputPeerClass, sel selection, cursor int, program *vm.Program, limit int) ([]qmessages.Elem, int, error) {
 	thread := max(sel.Topic, sel.Reply)
 	var q qmessages.Query
 	if thread > 0 {
-		q = query.NewQuery(s.ext.Client().API()).Messages().GetReplies(inputPeer).MsgID(thread)
+		q = query.NewQuery(api).Messages().GetReplies(inputPeer).MsgID(thread)
 	} else {
-		q = query.NewQuery(s.ext.Client().API()).Messages().GetHistory(inputPeer)
+		q = query.NewQuery(api).Messages().GetHistory(inputPeer)
 	}
 	if len(sel.IDs) > 0 {
 		if thread > 0 {
 			result, err := s.collectThreadIDs(ctx, q, inputPeer, sel.IDs, program)
 			return result, cursor, err
 		}
-		result, err := s.collectIDs(ctx, inputPeer, sel.IDs, program)
+		result, err := s.collectIDs(ctx, api, inputPeer, sel.IDs, program)
 		return result, cursor, err
 	}
 	lower, upper := cursor+1, 0
@@ -183,8 +197,8 @@ func (s *synchronizer) collect(ctx context.Context, inputPeer tg.InputPeerClass,
 	return result, seen, nil
 }
 
-func (s *synchronizer) loadDialogs(ctx context.Context, manager *peers.Manager) (tg.InputPeerClass, error) {
-	iter := query.GetDialogs(s.ext.Client().API()).BatchSize(telegramBatchSize).Iter()
+func (s *synchronizer) loadDialogs(ctx context.Context, manager *peers.Manager, api *tg.Client) (tg.InputPeerClass, error) {
+	iter := query.GetDialogs(api).BatchSize(telegramBatchSize).Iter()
 	users := map[int64]*tg.User{}
 	chats := map[int64]*tg.Chat{}
 	channels := map[int64]*tg.Channel{}
@@ -237,7 +251,7 @@ func dialogMatches(group string, raw tg.PeerClass, entities peer.Entities) bool 
 	return false
 }
 
-func (s *synchronizer) collectIDs(ctx context.Context, inputPeer tg.InputPeerClass, ids []int, program *vm.Program) ([]qmessages.Elem, error) {
+func (s *synchronizer) collectIDs(ctx context.Context, api *tg.Client, inputPeer tg.InputPeerClass, ids []int, program *vm.Program) ([]qmessages.Elem, error) {
 	result := []qmessages.Elem{}
 	for start := 0; start < len(ids); start += telegramBatchSize {
 		end := min(start+telegramBatchSize, len(ids))
@@ -249,11 +263,11 @@ func (s *synchronizer) collectIDs(ctx context.Context, inputPeer tg.InputPeerCla
 		var err error
 		switch p := inputPeer.(type) {
 		case *tg.InputPeerChannel:
-			response, err = s.ext.Client().API().ChannelsGetMessages(ctx, &tg.ChannelsGetMessagesRequest{
+			response, err = api.ChannelsGetMessages(ctx, &tg.ChannelsGetMessagesRequest{
 				Channel: &tg.InputChannel{ChannelID: p.ChannelID, AccessHash: p.AccessHash}, ID: input,
 			})
 		default:
-			response, err = s.ext.Client().API().MessagesGetMessages(ctx, input)
+			response, err = api.MessagesGetMessages(ctx, input)
 		}
 		if err != nil {
 			return nil, err
