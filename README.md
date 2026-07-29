@@ -1,6 +1,7 @@
 # tdl-archive
 
-> Disclaimer: This project was developed with heavy use of AI assistance. Tested and verified by the author.
+> [!CAUTION]
+> **Disclaimer:** This project was developed with heavy use of AI assistance. Tested and verified by the author.
 
 A [`tdl`](https://github.com/iyear/tdl) extension that syncs Telegram messages and attached media into the SQLite format consumed by [`tg-archive`](https://github.com/knadh/tg-archive).
 
