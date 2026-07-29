@@ -23,6 +23,11 @@ func run(ctx context.Context, ext *extension.Extension, args []string) error {
 	flags := flag.NewFlagSet("sync", flag.ContinueOnError)
 	configPath := flags.String("config", "config.yaml", "tgarchive config path")
 	dataPath := flags.String("data", "data.sqlite", "tgarchive SQLite database path")
+	chat := flags.String("chat", "", "chat ID, username, or title (uses native CLI configuration)")
+	downloadMedia := flags.Bool("download-media", false, "download attached media")
+	mediaDir := flags.String("media-dir", "", "media directory (default: media)")
+	mediaTypes := flags.String("media-type", "", "comma-separated MIME types to download")
+	fetchLimit := flags.Int("fetch-limit", 0, "maximum messages to sync; zero means unlimited")
 	dryRun := flags.Bool("dry-run", false, "show how many messages would be synced without writing")
 	jsonDump := flags.Bool("json-dump", false, "store raw Telegram JSON")
 	sel := selection{}
@@ -42,9 +47,29 @@ func run(ctx context.Context, ext *extension.Extension, args []string) error {
 	if err := sel.validate(); err != nil {
 		return err
 	}
-	cfg, err := loadConfig(*configPath)
-	if err != nil {
-		return fmt.Errorf("load config: %w", err)
+	if *fetchLimit < 0 {
+		return fmt.Errorf("--fetch-limit must be non-negative")
+	}
+	var cfg config
+	var err error
+	if *chat == "" {
+		if *downloadMedia || *mediaDir != "" || *mediaTypes != "" || *fetchLimit != 0 {
+			return fmt.Errorf("--download-media, --media-dir, --media-type, and --fetch-limit require --chat")
+		}
+		cfg, err = loadConfig(*configPath)
+		if err != nil {
+			return fmt.Errorf("load config: %w", err)
+		}
+	} else {
+		cfg = config{Group: *chat, MediaDir: "media", DownloadMedia: *downloadMedia, FetchBatchSize: 100, FetchLimit: *fetchLimit}
+		if *mediaDir != "" {
+			cfg.MediaDir = *mediaDir
+		}
+		for _, mime := range strings.Split(*mediaTypes, ",") {
+			if mime = strings.TrimSpace(mime); mime != "" {
+				cfg.MediaMIMETypes = append(cfg.MediaMIMETypes, mime)
+			}
+		}
 	}
 	if *jsonDump {
 		cfg.JSONDump = true

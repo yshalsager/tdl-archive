@@ -30,11 +30,19 @@ mise run release
 
 ## Sync
 
-Use an existing [`tg-archive`](https://github.com/knadh/tg-archive) `config.yaml`. Authentication, session storage, proxy settings, and connection pooling come from tdl; `api_id`, `api_hash`, and `proxy` in the tg-archive config are ignored.
+Sync directly with native CLI options, or use an existing [`tg-archive`](https://github.com/knadh/tg-archive) `config.yaml`. Authentication, session storage, proxy settings, and connection pooling always come from tdl; `api_id`, `api_hash`, and `proxy` in the tg-archive config are ignored.
 
 Raw Telegram JSON is disabled by default. Add `json_dump: true` to the config or pass `--json-dump` to populate the nullable `messages.json_dump` column.
 
 ```sh
+# Native configuration; no config.yaml is needed.
+tdl archive sync --chat @group
+tdl archive sync --chat @group --download-media --media-dir media
+tdl archive sync --chat @group --download-media --media-type image/jpeg,video/mp4
+
+# tg-archive compatibility configuration.
+tdl archive sync --config config.yaml
+
 # Continue after the saved cursor (or the greatest existing message ID).
 tdl archive sync
 
@@ -61,6 +69,11 @@ Options:
 
 - `--config`: config path, default `config.yaml`
 - `--data`: SQLite path, default `data.sqlite`
+- `--chat`: chat ID, username, or title; enables native CLI configuration without `config.yaml`
+- `--download-media`: download attached media in native mode
+- `--media-dir`: media directory in native mode, default `media`
+- `--media-type`: comma-separated MIME types to download in native mode
+- `--fetch-limit`: maximum messages to sync in native mode; zero means unlimited
 - `--dry-run`: report how many messages would be synced without writing the database or downloading media
 - `--id`: exact IDs; repeat, comma-separate, or space-separate them
 - `--from-id`: inclusive lower ID

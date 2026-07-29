@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,6 +15,9 @@ import (
 )
 
 func TestSelectionAndStore(t *testing.T) {
+	if err := run(context.Background(), nil, []string{"sync", "--media-dir", "media"}); err == nil || !strings.Contains(err.Error(), "require --chat") {
+		t.Fatalf("native option without chat: %v", err)
+	}
 	normalized := normalizeListFlags([]string{"--id", "1", "2", "--filter", "true"})
 	if len(normalized) != 4 || normalized[1] != "1,2" {
 		t.Fatalf("normalized args: %v", normalized)
