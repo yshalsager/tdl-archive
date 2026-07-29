@@ -4,4 +4,5 @@
 /data.sqlite
 /data.sqlite-*
 /media/
+/.idea/
 /.DS_Store

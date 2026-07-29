@@ -63,12 +63,12 @@ func openStore(path string, jsonDump bool) (*store, error) {
 		return nil, err
 	}
 	if _, err = db.Exec(schema); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, err
 	}
 	s := &store{db: db, jsonDump: jsonDump}
 	if err := s.ensureJSONDump(); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, err
 	}
 	return s, nil
@@ -79,7 +79,7 @@ func (s *store) ensureJSONDump() error {
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var cid, notnull, pk int
 		var name, typ string
@@ -111,7 +111,7 @@ func (s *store) save(messages []archiveMessage, scope string, cursor *int) error
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	for _, m := range messages {
 		if _, err = tx.Exec(`INSERT INTO users(id, username, first_name, last_name, tags, avatar) VALUES(?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET username=excluded.username, first_name=excluded.first_name,

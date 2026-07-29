@@ -8,6 +8,9 @@ builds:
       - CGO_ENABLED=0
     flags:
       - -trimpath
+    ldflags:
+      - -s -w
+    mod_timestamp: '{{ .CommitTimestamp }}'
     goos:
       - darwin
       - linux
@@ -17,13 +20,9 @@ builds:
       - arm64
 
 archives:
-  - files:
-      - LICENSE
-      - README.md
-    format_overrides:
-      - goos: windows
-        formats:
-          - zip
+  - formats:
+      - binary
+    name_template: '{{ .ProjectName }}-{{ .Os }}-{{ .Arch }}'
 
 checksum:
   name_template: checksums.txt

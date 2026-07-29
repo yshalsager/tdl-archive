@@ -35,7 +35,7 @@ func TestSelectionAndStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.db.Close()
+	defer func() { _ = db.db.Close() }()
 	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
 	cursor := 7
 	message := archiveMessage{ID: 7, Type: "message", Date: now, Content: "old", JSON: `{"id":7}`, User: archiveUser{ID: 3, Username: "user"}}
@@ -68,12 +68,14 @@ func TestSelectionAndStore(t *testing.T) {
 	if _, err = legacy.Exec("CREATE TABLE messages(id INTEGER PRIMARY KEY, type TEXT NOT NULL, date TIMESTAMP NOT NULL)"); err != nil {
 		t.Fatal(err)
 	}
-	legacy.Close()
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
 	migrated, err := openStore(legacyPath, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer migrated.db.Close()
+	defer func() { _ = migrated.db.Close() }()
 	if _, err := migrated.db.Exec("INSERT INTO messages(id,type,date,json_dump) VALUES(1,'message','2026-07-29','{}')"); err != nil {
 		t.Fatalf("json_dump migration failed: %v", err)
 	}
@@ -82,7 +84,7 @@ func TestSelectionAndStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer optional.db.Close()
+	defer func() { _ = optional.db.Close() }()
 	if err := optional.save([]archiveMessage{message}, "chat", nil); err != nil {
 		t.Fatal(err)
 	}

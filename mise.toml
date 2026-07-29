@@ -1,6 +1,7 @@
 [tools]
 go = '1.25.8'
 goreleaser = '2.17.1'
+golangci-lint = '2.6.2'
 
 [env]
 GOMAXPROCS = '2'
@@ -8,6 +9,10 @@ GOMAXPROCS = '2'
 [tasks.test]
 description = 'Run tests and vet'
 run = ['go test -p 2 ./...', 'go vet -p 2 ./...']
+
+[tasks.lint]
+description = 'Run golangci-lint'
+run = 'golangci-lint run --concurrency 2'
 
 [tasks.build]
 description = 'Build the local tdl-archive executable'

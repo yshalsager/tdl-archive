@@ -52,7 +52,7 @@ func run(ctx context.Context, ext *extension.Extension, args []string) error {
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
-	defer store.db.Close()
+	defer func() { _ = store.db.Close() }()
 	count, err := (&synchronizer{ext: ext, cfg: cfg, store: store}).run(ctx, sel)
 	if err == nil {
 		fmt.Printf("synced %d messages\n", count)
