@@ -8,7 +8,7 @@ A [`tdl`](https://github.com/iyear/tdl) extension that syncs Telegram messages a
 ## Install
 
 ```sh
-go install github.com/yshalsager/tdl-archive@latest
+tdl extension install yshalsager/tdl-archive
 tdl extension list
 ```
 
