@@ -23,6 +23,7 @@ func run(ctx context.Context, ext *extension.Extension, args []string) error {
 	flags := flag.NewFlagSet("sync", flag.ContinueOnError)
 	configPath := flags.String("config", "config.yaml", "tgarchive config path")
 	dataPath := flags.String("data", "data.sqlite", "tgarchive SQLite database path")
+	dryRun := flags.Bool("dry-run", false, "show how many messages would be synced without writing")
 	jsonDump := flags.Bool("json-dump", false, "store raw Telegram JSON")
 	sel := selection{}
 	flags.Var(&sel.IDs, "id", "message ID (repeat or comma-separate)")
@@ -48,14 +49,21 @@ func run(ctx context.Context, ext *extension.Extension, args []string) error {
 	if *jsonDump {
 		cfg.JSONDump = true
 	}
-	store, err := openStore(*dataPath, cfg.JSONDump)
+	if *dryRun {
+		cfg.DownloadMedia = false
+	}
+	store, err := openStore(*dataPath, cfg.JSONDump, *dryRun)
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
 	defer func() { _ = store.db.Close() }()
 	count, err := (&synchronizer{ext: ext, cfg: cfg, store: store}).run(ctx, sel)
 	if err == nil {
-		fmt.Printf("synced %d messages\n", count)
+		if *dryRun {
+			fmt.Printf("would sync %d messages\n", count)
+		} else {
+			fmt.Printf("synced %d messages\n", count)
+		}
 	}
 	return err
 }

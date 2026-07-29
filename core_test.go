@@ -31,7 +31,8 @@ func TestSelectionAndStore(t *testing.T) {
 		t.Fatalf("valid selector: explicit=%v thread=%d err=%v", valid.Explicit, max(valid.Topic, valid.Reply), err)
 	}
 
-	db, err := openStore(filepath.Join(t.TempDir(), "data.sqlite"), true)
+	dataPath := filepath.Join(t.TempDir(), "data.sqlite")
+	db, err := openStore(dataPath, true, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,6 +60,22 @@ func TestSelectionAndStore(t *testing.T) {
 	if got, err := db.cursor("new-topic", false); err != nil || got != 0 {
 		t.Fatalf("scoped cursor=%d err=%v", got, err)
 	}
+	dry, err := openStore(dataPath, true, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = dry.db.Close() }()
+	dryCursor := 9
+	message.Content = "dry run"
+	if err := dry.save([]archiveMessage{message}, "chat", &dryCursor); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := dry.cursor("chat", true); err != nil || got != 7 {
+		t.Fatalf("dry-run cursor=%d err=%v", got, err)
+	}
+	if err := db.db.QueryRow("SELECT content FROM messages WHERE id=7").Scan(&content); err != nil || content != "new" {
+		t.Fatalf("dry run changed content=%q err=%v", content, err)
+	}
 
 	legacyPath := filepath.Join(t.TempDir(), "legacy.sqlite")
 	legacy, err := sql.Open("sqlite", legacyPath)
@@ -71,7 +88,7 @@ func TestSelectionAndStore(t *testing.T) {
 	if err := legacy.Close(); err != nil {
 		t.Fatal(err)
 	}
-	migrated, err := openStore(legacyPath, true)
+	migrated, err := openStore(legacyPath, true, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +97,7 @@ func TestSelectionAndStore(t *testing.T) {
 		t.Fatalf("json_dump migration failed: %v", err)
 	}
 
-	optional, err := openStore(filepath.Join(t.TempDir(), "optional.sqlite"), false)
+	optional, err := openStore(filepath.Join(t.TempDir(), "optional.sqlite"), false, false)
 	if err != nil {
 		t.Fatal(err)
 	}

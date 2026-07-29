@@ -38,6 +38,9 @@ Raw Telegram JSON is disabled by default. Add `json_dump: true` to the config or
 # Continue after the saved cursor (or the greatest existing message ID).
 tdl archive sync
 
+# Preview the same selection without changing the database or downloading media.
+tdl archive sync --dry-run
+
 # Replace exact messages in the DB and replace their media files.
 tdl archive sync --id 120 121 140
 
@@ -58,6 +61,7 @@ Options:
 
 - `--config`: config path, default `config.yaml`
 - `--data`: SQLite path, default `data.sqlite`
+- `--dry-run`: report how many messages would be synced without writing the database or downloading media
 - `--id`: exact IDs; repeat, comma-separate, or space-separate them
 - `--from-id`: inclusive lower ID
 - `--type id|time|last` with `--input`

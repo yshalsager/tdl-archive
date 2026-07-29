@@ -2,7 +2,11 @@ package main
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
+	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -55,19 +59,37 @@ type archiveMessage struct {
 type store struct {
 	db       *sql.DB
 	jsonDump bool
+	dryRun   bool
 }
 
-func openStore(path string, jsonDump bool) (*store, error) {
-	db, err := sql.Open("sqlite", path)
+func openStore(path string, jsonDump, dryRun bool) (*store, error) {
+	dsn, initialize := path, true
+	if dryRun {
+		if _, err := os.Stat(path); err == nil {
+			dsn = (&url.URL{Scheme: "file", Path: filepath.ToSlash(path), RawQuery: "mode=ro"}).String()
+			initialize = false
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		} else {
+			dsn = ":memory:"
+		}
+	}
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
-	if _, err = db.Exec(schema); err != nil {
+	if initialize {
+		_, err = db.Exec(schema)
+	}
+	if err != nil {
 		_ = db.Close()
 		return nil, err
 	}
-	s := &store{db: db, jsonDump: jsonDump}
-	if err := s.ensureJSONDump(); err != nil {
+	s := &store{db: db, jsonDump: jsonDump, dryRun: dryRun}
+	if initialize {
+		err = s.ensureJSONDump()
+	}
+	if err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -98,6 +120,9 @@ func (s *store) ensureJSONDump() error {
 func (s *store) cursor(scope string, useExistingMessages bool) (int, error) {
 	var id int
 	err := s.db.QueryRow("SELECT last_seen_id FROM sync_state WHERE scope = ?", scope).Scan(&id)
+	if err != nil && strings.Contains(err.Error(), "no such table: sync_state") {
+		err = sql.ErrNoRows
+	}
 	if err == sql.ErrNoRows && useExistingMessages {
 		err = s.db.QueryRow("SELECT COALESCE(MAX(id), 0) FROM messages").Scan(&id)
 	} else if err == sql.ErrNoRows {
@@ -107,6 +132,9 @@ func (s *store) cursor(scope string, useExistingMessages bool) (int, error) {
 }
 
 func (s *store) save(messages []archiveMessage, scope string, cursor *int) error {
+	if s.dryRun {
+		return nil
+	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
