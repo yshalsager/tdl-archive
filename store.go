@@ -130,6 +130,7 @@ func (s *store) prepare(peer peerResult, bootstrap bool) (bool, error) {
 	if err != sql.ErrNoRows && !strings.Contains(err.Error(), "no such table: archive_metadata") {
 		return false, err
 	}
+	err = nil
 	pending := true
 	if s.dryRun {
 		if !s.existing {

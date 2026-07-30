@@ -116,6 +116,11 @@ func TestSelectionAndStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = migrated.db.Close() }()
+	migrated.dryRun = true
+	if pending, err := migrated.prepare(identity, false); err != nil || !pending {
+		t.Fatalf("legacy dry-run pending=%v err=%v", pending, err)
+	}
+	migrated.dryRun = false
 	if _, err := migrated.prepare(identity, false); err == nil || !strings.Contains(err.Error(), "bootstrap-peer") {
 		t.Fatalf("legacy database was bound implicitly: %v", err)
 	}
