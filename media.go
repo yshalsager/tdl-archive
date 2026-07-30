@@ -5,11 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	gotddownloader "github.com/gotd/td/telegram/downloader"
@@ -197,9 +195,9 @@ func (m *mediaMapper) download(file *tmedia.Media, path string) error {
 }
 
 func fatalMediaError(err error) bool {
+	var pathError *os.PathError
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
-		errors.Is(err, fs.ErrPermission) || errors.Is(err, syscall.ENOSPC) ||
-		errors.Is(err, syscall.EROFS) || errors.Is(err, syscall.ENOTDIR) || errors.Is(err, syscall.EIO)
+		errors.As(err, &pathError)
 }
 
 func stickerText(raw tg.MessageMediaClass) string {

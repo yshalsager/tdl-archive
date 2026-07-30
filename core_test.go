@@ -221,6 +221,10 @@ func TestConfigOverrides(t *testing.T) {
 	if !wantsJSON([]string{"sync", "--bad", "--json"}) || wantsJSON([]string{"sync", "--json=false"}) {
 		t.Fatal("JSON mode pre-detection failed")
 	}
+	var output strings.Builder
+	if err := writeResult(&output, runResult{Version: 1}); err != nil || strings.Contains(output.String(), "starting_cursor") {
+		t.Fatalf("unavailable cursor was emitted: %s err=%v", output.String(), err)
+	}
 }
 
 func TestIdentityAndMediaFailures(t *testing.T) {
@@ -288,5 +292,8 @@ func TestMediaRetries(t *testing.T) {
 	}
 	if !fatalMediaError(context.Canceled) || !fatalMediaError(context.DeadlineExceeded) {
 		t.Fatal("context termination was treated as recoverable")
+	}
+	if !fatalMediaError(&os.PathError{Op: "open", Path: "media.tmp", Err: errors.New("local")}) {
+		t.Fatal("local path failure was treated as recoverable")
 	}
 }

@@ -24,8 +24,8 @@ type mediaStats struct {
 }
 
 type syncResult struct {
-	StartingCursor int
-	EndingCursor   int
+	StartingCursor *int
+	EndingCursor   *int
 	Selected       int
 	Saved          int
 	Media          mediaStats

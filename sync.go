@@ -100,7 +100,8 @@ func (s *synchronizer) sync(ctx context.Context, sel selection, p peers.Peer) (s
 	if err != nil {
 		return result, err
 	}
-	result.StartingCursor, result.EndingCursor = cursor, cursor
+	startingCursor, endingCursor := cursor, cursor
+	result.StartingCursor, result.EndingCursor = &startingCursor, &endingCursor
 
 	var program *vm.Program
 	if sel.Filter != "" {
@@ -168,7 +169,7 @@ func (s *synchronizer) sync(ctx context.Context, sel selection, p peers.Peer) (s
 			}
 		}
 		if next != nil {
-			result.EndingCursor = *next
+			endingCursor = *next
 		}
 		total += len(messages)
 		if !incremental || len(elems) < limit || seen <= cursor || s.cfg.FetchLimit > 0 && total >= s.cfg.FetchLimit {

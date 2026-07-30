@@ -59,7 +59,7 @@ func run(ctx context.Context, ext *extension.Extension, args []string) error {
 				result.Peer = &syncer.peer
 			}
 			result.DialogTopMessageID = syncer.dialogTopMessageID
-			result.StartingCursor, result.EndingCursor = &synced.StartingCursor, &synced.EndingCursor
+			result.StartingCursor, result.EndingCursor = synced.StartingCursor, synced.EndingCursor
 			result.Selected, result.Saved, result.Media = synced.Selected, synced.Saved, synced.Media
 			result.Warnings = synced.Warnings
 			if err == nil && !options.JSON {
