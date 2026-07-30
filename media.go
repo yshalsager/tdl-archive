@@ -14,6 +14,7 @@ import (
 	gotddownloader "github.com/gotd/td/telegram/downloader"
 	"github.com/gotd/td/telegram/query/messages"
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 	"github.com/iyear/tdl/core/dcpool"
 	coredownloader "github.com/iyear/tdl/core/downloader"
 	coretakeout "github.com/iyear/tdl/core/middlewares/takeout"
@@ -202,7 +203,7 @@ func mediaMiddlewares(ctx context.Context, takeoutID int64) []telegram.Middlewar
 func fatalMediaError(err error) bool {
 	var pathError *os.PathError
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
-		errors.As(err, &pathError)
+		errors.As(err, &pathError) || tgerr.IsCode(err, 420)
 }
 
 func stickerText(raw tg.MessageMediaClass) string {

@@ -35,6 +35,7 @@ type synchronizer struct {
 	takeout            tg.Invoker
 	ranges             []tg.MessageRange
 	takeoutID          int64
+	historyFetched     int
 }
 
 const telegramBatchSize = 100
@@ -275,6 +276,42 @@ func (s *synchronizer) sync(ctx context.Context, sel selection, p peers.Peer) (s
 	}
 }
 
+func waitContext(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (s *synchronizer) pacedQuery(q qmessages.Query) qmessages.Query {
+	if s.cfg.FetchWait == 0 {
+		return q
+	}
+	return qmessages.QueryFunc(func(ctx context.Context, req qmessages.Request) (tg.MessagesMessagesClass, error) {
+		if s.historyFetched >= s.cfg.FetchBatchSize {
+			if err := waitContext(ctx, time.Duration(s.cfg.FetchWait)*time.Second); err != nil {
+				return nil, err
+			}
+			s.historyFetched = 0
+		}
+		result, err := q.Query(ctx, req)
+		if err == nil {
+			modified, ok := result.AsModified()
+			if ok {
+				s.historyFetched += len(modified.GetMessages())
+			}
+		}
+		return result, err
+	})
+}
+
 func (s *synchronizer) retryMediaFailures(ctx context.Context, p peers.Peer, mapper *mediaMapper) (mediaStats, []string, error) {
 	stats := mediaStats{}
 	ids, err := s.store.pendingMediaFailures()
@@ -340,6 +377,7 @@ func (s *synchronizer) collectFrom(ctx context.Context, api *tg.Client, inputPee
 	} else {
 		q = query.NewQuery(api).Messages().GetHistory(inputPeer)
 	}
+	q = s.pacedQuery(q)
 	if len(sel.IDs) > 0 {
 		if thread > 0 {
 			result, err := s.collectThreadIDs(ctx, q, inputPeer, sel.IDs, program)

@@ -83,6 +83,7 @@ Options:
 - `--media-type`: override the comma-separated MIME filter
 - `--fetch-batch-size`: override messages processed per database checkpoint; Telegram requests remain capped at `100`
 - `--fetch-limit`: maximum incremental messages to sync; zero means unlimited and explicit selectors reject a nonzero limit
+- `--fetch-wait`: seconds to wait between full incremental batches
 - `--takeout`: override Telegram takeout mode
 - `--dry-run`: report how many messages would be synced without writing the database or downloading media
 - `--id`: exact IDs; repeat, comma-separate, or space-separate them

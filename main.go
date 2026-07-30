@@ -94,6 +94,7 @@ func parseOptions(args []string) (*commandOptions, error) {
 	mediaDir := flags.String("media-dir", "", "media directory")
 	mediaTypes := flags.String("media-type", "", "comma-separated MIME types to download")
 	fetchBatchSize := flags.Int("fetch-batch-size", 100, "messages to process per checkpoint")
+	fetchWait := flags.Int("fetch-wait", 0, "seconds to wait between full batches")
 	fetchLimit := flags.Int("fetch-limit", 0, "maximum messages to sync")
 	useTakeout := flags.Bool("takeout", false, "use Telegram's takeout API")
 	dryRun := flags.Bool("dry-run", false, "preview without writing")
@@ -141,6 +142,9 @@ func parseOptions(args []string) (*commandOptions, error) {
 	}
 	if visited["fetch-batch-size"] {
 		cfg.FetchBatchSize = *fetchBatchSize
+	}
+	if visited["fetch-wait"] {
+		cfg.FetchWait = *fetchWait
 	}
 	if visited["fetch-limit"] {
 		cfg.FetchLimit = *fetchLimit

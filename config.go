@@ -14,6 +14,7 @@ type config struct {
 	DownloadMedia  bool     `yaml:"download_media"`
 	MediaMIMETypes []string `yaml:"media_mime_types"`
 	FetchBatchSize int      `yaml:"fetch_batch_size"`
+	FetchWait      int      `yaml:"fetch_wait"`
 	FetchLimit     int      `yaml:"fetch_limit"`
 	UseTakeout     bool     `yaml:"use_takeout"`
 	JSONDump       bool     `yaml:"json_dump"`
@@ -43,6 +44,9 @@ func (c config) validate() error {
 	}
 	if c.FetchLimit < 0 {
 		return fmt.Errorf("fetch_limit must be non-negative")
+	}
+	if c.FetchWait < 0 {
+		return fmt.Errorf("fetch_wait must be non-negative")
 	}
 	return nil
 }

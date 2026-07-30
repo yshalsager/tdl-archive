@@ -221,14 +221,14 @@ func TestSelectionAndStore(t *testing.T) {
 
 func TestConfigOverrides(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(path, []byte("group: original\ndownload_media: true\nfetch_batch_size: 50\nfetch_limit: 20\njson_dump: true\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("group: original\ndownload_media: true\nfetch_batch_size: 50\nfetch_wait: 5\nfetch_limit: 20\njson_dump: true\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	options, err := parseOptions([]string{"sync", "--config", path, "--chat", "override", "--download-media=false", "--fetch-limit", "1", "--json-dump=false"})
+	options, err := parseOptions([]string{"sync", "--config", path, "--chat", "override", "--download-media=false", "--fetch-wait", "2", "--fetch-limit", "1", "--json-dump=false"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if options.Config.Group != "override" || options.Config.DownloadMedia || options.Config.FetchBatchSize != 50 || options.Config.FetchLimit != 1 || options.Config.JSONDump {
+	if options.Config.Group != "override" || options.Config.DownloadMedia || options.Config.FetchBatchSize != 50 || options.Config.FetchWait != 2 || options.Config.FetchLimit != 1 || options.Config.JSONDump {
 		t.Fatalf("unexpected merged config: %+v", options.Config)
 	}
 	if _, err := parseOptions([]string{"sync", "--config", path, "--id", "1"}); err == nil || !strings.Contains(err.Error(), "fetch-limit") {
@@ -240,6 +240,25 @@ func TestConfigOverrides(t *testing.T) {
 	var output strings.Builder
 	if err := writeResult(&output, runResult{Version: 1}); err != nil || strings.Contains(output.String(), "starting_cursor") {
 		t.Fatalf("unavailable cursor was emitted: %s err=%v", output.String(), err)
+	}
+}
+
+func TestHistoryPacingStopsBeforeTheNextRequest(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	calls := 0
+	syncer := synchronizer{cfg: config{FetchBatchSize: 2, FetchWait: 3600}}
+	query := syncer.pacedQuery(messages.QueryFunc(func(context.Context, messages.Request) (tg.MessagesMessagesClass, error) {
+		calls++
+		return &tg.MessagesMessages{Messages: []tg.MessageClass{&tg.Message{ID: calls}}}, nil
+	}))
+	for range 2 {
+		if _, err := query.Query(ctx, messages.Request{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cancel()
+	if _, err := query.Query(ctx, messages.Request{}); !errors.Is(err, context.Canceled) || calls != 2 {
+		t.Fatalf("pacing did not stop the next request: calls=%d err=%v", calls, err)
 	}
 }
 
@@ -376,5 +395,16 @@ func TestMediaRetries(t *testing.T) {
 	}
 	if !fatalMediaError(&os.PathError{Op: "open", Path: "media.tmp", Err: errors.New("local")}) {
 		t.Fatal("local path failure was treated as recoverable")
+	}
+	if !fatalMediaError(tgerr.New(420, "FLOOD_WAIT_5")) {
+		t.Fatal("flood wait was treated as recoverable")
+	}
+	calls = 0
+	mapper.downloadFn = func(*tmedia.Media, string) error {
+		calls++
+		return tgerr.New(420, "FLOOD_WAIT_LIMIT_EXCEEDED_60")
+	}
+	if _, _, err := mapper.message(messages.Elem{Msg: message, Entities: entities}, false, false); err == nil || calls != 1 {
+		t.Fatalf("flood wait retry result: calls=%d err=%v", calls, err)
 	}
 }
