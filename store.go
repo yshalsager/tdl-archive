@@ -210,7 +210,7 @@ func (s *store) ensurePeerFlags() error {
 	if !strings.Contains(err.Error(), "no such column: peer_flags") {
 		return err
 	}
-	_, err = s.db.Exec("ALTER TABLE archive_peer_cache ADD COLUMN peer_flags INTEGER NOT NULL DEFAULT 0")
+	_, err = s.db.Exec("ALTER TABLE archive_peer_cache ADD COLUMN peer_flags INTEGER NOT NULL DEFAULT -1")
 	return err
 }
 
@@ -223,6 +223,9 @@ FROM archive_metadata m JOIN archive_peer_cache c ON c.id = m.id WHERE m.id = 1`
 	}
 	if err != nil {
 		return nil, err
+	}
+	if peer.Flags < 0 {
+		return nil, nil
 	}
 	if peer.AccessHash == 0 && peer.Type != "chat" {
 		return nil, nil

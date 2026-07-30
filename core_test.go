@@ -260,6 +260,12 @@ INSERT INTO archive_peer_cache VALUES(1, 'channel', 'Channel', 99);`); err != ni
 	if cached, err := store.pinnedPeer(); err != nil || cached != nil {
 		t.Fatalf("old cache was not treated as a miss: %+v err=%v", cached, err)
 	}
+	if err := store.ensurePeerFlags(); err != nil {
+		t.Fatal(err)
+	}
+	if cached, err := store.pinnedPeer(); err != nil || cached != nil {
+		t.Fatalf("interrupted cache migration was treated as complete: %+v err=%v", cached, err)
+	}
 	if _, err := store.prepare(identity, false); err != nil {
 		t.Fatal(err)
 	}
