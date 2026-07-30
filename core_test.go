@@ -48,7 +48,7 @@ func TestSelectionAndStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = db.db.Close() }()
-	identity := peerResult{Selector: "channel", ID: -1000000000009, Type: "channel", Title: "Channel", AccessHash: 99}
+	identity := peerResult{Selector: "channel", ID: -1000000000009, Type: "channel", Title: "Channel", AccessHash: 99, Flags: channelMegagroup | channelPublic}
 	if _, err := db.prepare(identity, false); err != nil {
 		t.Fatal(err)
 	}
@@ -250,7 +250,7 @@ func TestIdentityAndMediaFailures(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = store.db.Close() }()
-	identity := peerResult{Selector: "channel", ID: -1000000000009, Type: "channel", Title: "Channel", AccessHash: 99}
+	identity := peerResult{Selector: "channel", ID: -1000000000009, Type: "channel", Title: "Channel", AccessHash: 99, Flags: channelMegagroup | channelPublic}
 	if _, err := store.prepare(identity, false); err != nil {
 		t.Fatal(err)
 	}
@@ -258,7 +258,9 @@ func TestIdentityAndMediaFailures(t *testing.T) {
 	if err != nil || cached == nil || cached.ID != identity.ID || cached.AccessHash != identity.AccessHash {
 		t.Fatalf("cached peer=%+v err=%v", cached, err)
 	}
-	if p, err := cachedPeer(peers.Options{}.Build(nil), *cached); err != nil || p.InputPeer().(*tg.InputPeerChannel).AccessHash != identity.AccessHash {
+	p, err := cachedPeer(peers.Options{}.Build(nil), *cached)
+	channel, channelOK := p.(peers.Channel)
+	if err != nil || !channelOK || channel.InputPeer().(*tg.InputPeerChannel).AccessHash != identity.AccessHash || !channel.IsSupergroup() || !isPublicChannel(channel.Raw()) {
 		t.Fatalf("reconstructed peer=%+v err=%v", p, err)
 	}
 	if _, err := store.prepare(peerResult{ID: -1000000000010, Type: "channel"}, false); err == nil || !strings.Contains(err.Error(), "pinned") {
@@ -323,8 +325,14 @@ func TestPeerResolutionAndFloodWait(t *testing.T) {
 
 	flood := tgerr.New(420, tgerr.ErrFloodWait)
 	flood.Argument = 60
-	limited := floodWaitMiddlewares()[0].Handle(telegram.InvokeFunc(func(context.Context, bin.Encoder, bin.Decoder) error { return flood }))
-	err = limited.Invoke(context.Background(), &tg.ContactsResolveUsernameRequest{}, &tg.ContactsResolvedPeer{})
+	var limited tg.Invoker = telegram.InvokeFunc(func(context.Context, bin.Encoder, bin.Decoder) error { return flood })
+	middlewares := mediaMiddlewares(context.Background(), 0)
+	for i := len(middlewares) - 1; i >= 0; i-- {
+		limited = middlewares[i].Handle(limited)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	err = limited.Invoke(ctx, &tg.ContactsResolveUsernameRequest{}, &tg.ContactsResolvedPeer{})
 	rpcError, businessError := tgerr.As(err)
 	if _, hidden := tgerr.AsFloodWait(err); hidden || !businessError || rpcError.Type != floodWaitLimitExceeded || rpcError.Argument != 60 {
 		t.Fatalf("long flood wait was not surfaced: %v", err)

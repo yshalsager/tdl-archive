@@ -37,7 +37,8 @@ CREATE TABLE IF NOT EXISTS archive_metadata (
 );
 CREATE TABLE IF NOT EXISTS archive_peer_cache (
   id INTEGER NOT NULL PRIMARY KEY CHECK(id = 1),
-  peer_selector TEXT NOT NULL, peer_title TEXT NOT NULL, peer_access_hash INTEGER NOT NULL
+  peer_selector TEXT NOT NULL, peer_title TEXT NOT NULL,
+  peer_access_hash INTEGER NOT NULL, peer_flags INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS media_failures (
   message_id INTEGER NOT NULL PRIMARY KEY,
@@ -93,6 +94,7 @@ type store struct {
 
 type storedPeer struct {
 	ID, AccessHash int64
+	Flags          int
 	Type, Selector string
 	Title          string
 }
@@ -191,15 +193,15 @@ func (s *store) ensureJSONDump() error {
 }
 
 func (s *store) savePeerCache(peer peerResult) error {
-	_, err := s.db.Exec(`INSERT INTO archive_peer_cache(id, peer_selector, peer_title, peer_access_hash) VALUES(1, ?, ?, ?)
-ON CONFLICT(id) DO UPDATE SET peer_selector=excluded.peer_selector, peer_title=excluded.peer_title, peer_access_hash=excluded.peer_access_hash`, peer.Selector, peer.Title, peer.AccessHash)
+	_, err := s.db.Exec(`INSERT INTO archive_peer_cache(id, peer_selector, peer_title, peer_access_hash, peer_flags) VALUES(1, ?, ?, ?, ?)
+ON CONFLICT(id) DO UPDATE SET peer_selector=excluded.peer_selector, peer_title=excluded.peer_title, peer_access_hash=excluded.peer_access_hash, peer_flags=excluded.peer_flags`, peer.Selector, peer.Title, peer.AccessHash, peer.Flags)
 	return err
 }
 
 func (s *store) pinnedPeer() (*storedPeer, error) {
 	peer := &storedPeer{}
-	err := s.db.QueryRow(`SELECT m.peer_id, m.peer_type, c.peer_selector, c.peer_title, c.peer_access_hash
-FROM archive_metadata m JOIN archive_peer_cache c ON c.id = m.id WHERE m.id = 1`).Scan(&peer.ID, &peer.Type, &peer.Selector, &peer.Title, &peer.AccessHash)
+	err := s.db.QueryRow(`SELECT m.peer_id, m.peer_type, c.peer_selector, c.peer_title, c.peer_access_hash, c.peer_flags
+FROM archive_metadata m JOIN archive_peer_cache c ON c.id = m.id WHERE m.id = 1`).Scan(&peer.ID, &peer.Type, &peer.Selector, &peer.Title, &peer.AccessHash, &peer.Flags)
 	if err == sql.ErrNoRows || err != nil && strings.Contains(err.Error(), "no such table") {
 		return nil, nil
 	}

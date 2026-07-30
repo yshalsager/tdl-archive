@@ -13,6 +13,7 @@ type peerResult struct {
 	Type       string `json:"type"`
 	ID         int64  `json:"id"`
 	AccessHash int64  `json:"-"`
+	Flags      int    `json:"-"`
 }
 
 type mediaStats struct {

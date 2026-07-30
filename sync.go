@@ -39,6 +39,12 @@ type synchronizer struct {
 
 const telegramBatchSize = 100
 
+const (
+	channelMegagroup = 1 << iota
+	channelBroadcast
+	channelPublic
+)
+
 func (s *synchronizer) run(ctx context.Context, sel selection) (syncResult, error) {
 	api := s.ext.Client().API()
 	manager := peers.Options{}.Build(api)
@@ -46,7 +52,7 @@ func (s *synchronizer) run(ctx context.Context, sel selection) (syncResult, erro
 	if err != nil {
 		return syncResult{}, fmt.Errorf("resolve group: %w", err)
 	}
-	s.peer = peerResult{Selector: s.cfg.Group, Title: p.VisibleName(), ID: int64(p.TDLibPeerID()), AccessHash: peerAccessHash(p.InputPeer())}
+	s.peer = peerResult{Selector: s.cfg.Group, Title: p.VisibleName(), ID: int64(p.TDLibPeerID()), AccessHash: peerAccessHash(p.InputPeer()), Flags: peerFlags(p)}
 	s.dialogTopMessageID = dialogTop
 	switch p.(type) {
 	case peers.User:
@@ -126,10 +132,36 @@ func cachedPeer(manager *peers.Manager, cached storedPeer) (peers.Peer, error) {
 	case "chat":
 		return manager.Chat(&tg.Chat{ID: id, Title: cached.Title}), nil
 	case "channel":
-		return manager.Channel(&tg.Channel{ID: id, AccessHash: cached.AccessHash, Title: cached.Title}), nil
+		channel := &tg.Channel{
+			ID: id, AccessHash: cached.AccessHash, Title: cached.Title,
+			Megagroup: cached.Flags&channelMegagroup != 0,
+			Broadcast: cached.Flags&channelBroadcast != 0,
+		}
+		if cached.Flags&channelPublic != 0 {
+			channel.SetUsername(strings.TrimPrefix(cached.Selector, "@"))
+		}
+		return manager.Channel(channel), nil
 	default:
 		return nil, fmt.Errorf("unsupported cached peer type %q", cached.Type)
 	}
+}
+
+func peerFlags(p peers.Peer) int {
+	channel, ok := p.(peers.Channel)
+	if !ok {
+		return 0
+	}
+	flags := 0
+	if channel.IsSupergroup() {
+		flags |= channelMegagroup
+	}
+	if channel.IsBroadcast() {
+		flags |= channelBroadcast
+	}
+	if isPublicChannel(channel.Raw()) {
+		flags |= channelPublic
+	}
+	return flags
 }
 
 func peerAccessHash(input tg.InputPeerClass) int64 {

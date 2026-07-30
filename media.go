@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gotd/td/telegram"
 	gotddownloader "github.com/gotd/td/telegram/downloader"
 	"github.com/gotd/td/telegram/query/messages"
 	"github.com/gotd/td/tg"
@@ -174,11 +175,7 @@ func (m *mediaMapper) allowed(raw tg.MessageMediaClass) bool {
 
 func (m *mediaMapper) download(file *tmedia.Media, path string) error {
 	if m.pool == nil {
-		middlewares := tclient.NewDefaultMiddlewares(m.ctx, 0)
-		if m.takeoutID != 0 {
-			middlewares = append(middlewares, coretakeout.Middleware(m.takeoutID))
-		}
-		m.pool = dcpool.NewPool(m.ext.Client(), m.ext.Config().Pool, middlewares...)
+		m.pool = dcpool.NewPool(m.ext.Client(), m.ext.Config().Pool, mediaMiddlewares(m.ctx, m.takeoutID)...)
 	}
 	tmp := path + ".tmp"
 	_ = os.Remove(tmp)
@@ -192,6 +189,14 @@ func (m *mediaMapper) download(file *tmedia.Media, path string) error {
 		_ = os.Remove(tmp)
 	}
 	return err
+}
+
+func mediaMiddlewares(ctx context.Context, takeoutID int64) []telegram.Middleware {
+	middlewares := append(tclient.NewDefaultMiddlewares(ctx, 0), floodWaitMiddlewares()...)
+	if takeoutID != 0 {
+		middlewares = append(middlewares, coretakeout.Middleware(takeoutID))
+	}
+	return middlewares
 }
 
 func fatalMediaError(err error) bool {
