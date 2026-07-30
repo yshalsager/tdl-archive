@@ -72,7 +72,15 @@ func TestSelectionAndStore(t *testing.T) {
 	if got, err := db.cursor("new-topic", false); err != nil || got != 0 {
 		t.Fatalf("scoped cursor=%d err=%v", got, err)
 	}
-	dry, err := openStore(dataPath, true, true)
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	relativeDataPath, err := filepath.Rel(workingDirectory, dataPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dry, err := openStore(relativeDataPath, true, true)
 	if err != nil {
 		t.Fatal(err)
 	}

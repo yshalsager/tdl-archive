@@ -96,7 +96,11 @@ func openStore(path string, jsonDump, dryRun bool) (*store, error) {
 	dsn := path
 	if dryRun {
 		if existing {
-			dsn = (&url.URL{Scheme: "file", Path: filepath.ToSlash(path), RawQuery: "mode=ro"}).String()
+			absolutePath, err := filepath.Abs(path)
+			if err != nil {
+				return nil, err
+			}
+			dsn = (&url.URL{Scheme: "file", Path: filepath.ToSlash(absolutePath), RawQuery: "mode=ro"}).String()
 		} else {
 			dsn = ":memory:"
 		}
