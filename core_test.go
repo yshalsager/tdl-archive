@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,12 +15,10 @@ import (
 	"github.com/gotd/td/telegram/message/peer"
 	"github.com/gotd/td/telegram/query/messages"
 	"github.com/gotd/td/tg"
+	"github.com/iyear/tdl/core/tmedia"
 )
 
 func TestSelectionAndStore(t *testing.T) {
-	if err := run(context.Background(), nil, []string{"sync", "--media-dir", "media"}); err == nil || !strings.Contains(err.Error(), "require --chat") {
-		t.Fatalf("native option without chat: %v", err)
-	}
 	if err := run(context.Background(), nil, []string{"sync", "--chat", "group", "--fetch-batch-size", "0"}); err == nil || !strings.Contains(err.Error(), "must be positive") {
 		t.Fatalf("invalid native batch size: %v", err)
 	}
@@ -46,6 +45,10 @@ func TestSelectionAndStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = db.db.Close() }()
+	identity := peerResult{ID: -1009, Type: "channel"}
+	if _, err := db.prepare(identity, false); err != nil {
+		t.Fatal(err)
+	}
 	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
 	cursor := 7
 	message := archiveMessage{ID: 7, Type: "message", Date: now, Content: "old", JSON: `{"id":7}`, User: archiveUser{ID: 3, Username: "user"}}
@@ -74,6 +77,9 @@ func TestSelectionAndStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = dry.db.Close() }()
+	if _, err := dry.prepare(identity, false); err != nil {
+		t.Fatal(err)
+	}
 	dryCursor := 9
 	message.Content = "dry run"
 	if err := dry.save([]archiveMessage{message}, "chat", &dryCursor); err != nil {
@@ -102,6 +108,12 @@ func TestSelectionAndStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = migrated.db.Close() }()
+	if _, err := migrated.prepare(identity, false); err == nil || !strings.Contains(err.Error(), "bootstrap-peer") {
+		t.Fatalf("legacy database was bound implicitly: %v", err)
+	}
+	if _, err := migrated.prepare(identity, true); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := migrated.db.Exec("INSERT INTO messages(id,type,date,json_dump) VALUES(1,'message','2026-07-29','{}')"); err != nil {
 		t.Fatalf("json_dump migration failed: %v", err)
 	}
@@ -111,6 +123,9 @@ func TestSelectionAndStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = optional.db.Close() }()
+	if _, err := optional.prepare(identity, false); err != nil {
+		t.Fatal(err)
+	}
 	if err := optional.save([]archiveMessage{message}, "chat", nil); err != nil {
 		t.Fatal(err)
 	}
@@ -134,9 +149,9 @@ func TestSelectionAndStore(t *testing.T) {
 	photo := &tg.MessageMediaPhoto{Photo: &tg.Photo{ID: 1, DCID: 1, Sizes: []tg.PhotoSizeClass{&tg.PhotoSize{Type: "x", Size: 1}}}}
 	mediaMessage := &tg.Message{ID: 1, Date: 1, PeerID: &tg.PeerChannel{ChannelID: 9}}
 	mediaMessage.SetMedia(photo)
-	_, err = (&mediaMapper{cfg: config{DownloadMedia: true, MediaDir: blockedMediaDir}, overwrite: true}).message(messages.Elem{
+	_, _, err = (&mediaMapper{ctx: context.Background(), cfg: config{DownloadMedia: true, MediaDir: blockedMediaDir}}).message(messages.Elem{
 		Msg: mediaMessage, Entities: entities,
-	})
+	}, true, false)
 	if err == nil {
 		t.Fatal("explicit media replacement ignored a download error")
 	}
@@ -185,5 +200,93 @@ func TestSelectionAndStore(t *testing.T) {
 	public.SetUsernames([]tg.Username{{Username: "public", Active: true}})
 	if !isPublicChannel(public) || isPublicChannel(&tg.Channel{}) {
 		t.Fatal("takeout public channel detection failed")
+	}
+}
+
+func TestConfigOverrides(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("group: original\ndownload_media: true\nfetch_batch_size: 50\nfetch_limit: 20\njson_dump: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	options, err := parseOptions([]string{"sync", "--config", path, "--chat", "override", "--download-media=false", "--fetch-limit", "1", "--json-dump=false"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if options.Config.Group != "override" || options.Config.DownloadMedia || options.Config.FetchBatchSize != 50 || options.Config.FetchLimit != 1 || options.Config.JSONDump {
+		t.Fatalf("unexpected merged config: %+v", options.Config)
+	}
+	if _, err := parseOptions([]string{"sync", "--config", path, "--id", "1"}); err == nil || !strings.Contains(err.Error(), "fetch-limit") {
+		t.Fatalf("explicit selector accepted configured fetch limit: %v", err)
+	}
+	if !wantsJSON([]string{"sync", "--bad", "--json"}) || wantsJSON([]string{"sync", "--json=false"}) {
+		t.Fatal("JSON mode pre-detection failed")
+	}
+}
+
+func TestIdentityAndMediaFailures(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.sqlite")
+	store, err := openStore(path, true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.db.Close() }()
+	identity := peerResult{ID: -1009, Type: "channel"}
+	if _, err := store.prepare(identity, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.prepare(peerResult{ID: -1010, Type: "channel"}, false); err == nil || !strings.Contains(err.Error(), "pinned") {
+		t.Fatalf("peer mismatch accepted: %v", err)
+	}
+	now := time.Now().UTC()
+	cursor := 1
+	message := archiveMessage{ID: 1, Type: "message", Date: now, User: archiveUser{ID: 1}, Media: &archiveMedia{ID: 1, URL: "1.jpg"}, MediaAction: mediaReplace}
+	if err := store.save([]archiveMessage{message}, "9", &cursor); err != nil {
+		t.Fatal(err)
+	}
+	cursor = 2
+	message.Media, message.MediaAction = nil, mediaKeep
+	message.MediaFailure = &mediaFailure{Attempts: 3, Error: "download failed"}
+	if err := store.save([]archiveMessage{message}, "9", &cursor); err != nil {
+		t.Fatal(err)
+	}
+	var mediaID, attempts int
+	if err := store.db.QueryRow("SELECT media_id FROM messages WHERE id = 1").Scan(&mediaID); err != nil || mediaID != 1 {
+		t.Fatalf("media link was not preserved: id=%d err=%v", mediaID, err)
+	}
+	if err := store.db.QueryRow("SELECT attempts FROM media_failures WHERE message_id = 1").Scan(&attempts); err != nil || attempts != 3 {
+		t.Fatalf("failure was not persisted: attempts=%d err=%v", attempts, err)
+	}
+	if got, err := store.cursor("9", false); err != nil || got != 2 {
+		t.Fatalf("cursor=%d err=%v", got, err)
+	}
+	message.Media = &archiveMedia{ID: 1, URL: "1.jpg"}
+	message.MediaAction, message.MediaFailure, message.ClearMediaFailure = mediaReplace, nil, true
+	if err := store.save([]archiveMessage{message}, "", nil); err != nil {
+		t.Fatal(err)
+	}
+	if ids, err := store.pendingMediaFailures(); err != nil || len(ids) != 0 {
+		t.Fatalf("failure was not cleared: ids=%v err=%v", ids, err)
+	}
+}
+
+func TestMediaRetries(t *testing.T) {
+	entities := peer.NewEntities(nil, nil, map[int64]*tg.Channel{9: {ID: 9, Title: "group"}})
+	photo := &tg.MessageMediaPhoto{Photo: &tg.Photo{ID: 1, DCID: 1, Sizes: []tg.PhotoSizeClass{&tg.PhotoSize{Type: "x", Size: 1}}}}
+	message := &tg.Message{ID: 1, Date: 1, PeerID: &tg.PeerChannel{ChannelID: 9}}
+	message.SetMedia(photo)
+	oldDelay := mediaRetryDelay
+	mediaRetryDelay = 0
+	defer func() { mediaRetryDelay = oldDelay }()
+	calls := 0
+	mapper := mediaMapper{ctx: context.Background(), cfg: config{DownloadMedia: true, MediaDir: t.TempDir()}, downloadFn: func(*tmedia.Media, string) error {
+		calls++
+		return errors.New("network")
+	}}
+	archived, event, err := mapper.message(messages.Elem{Msg: message, Entities: entities}, false, false)
+	if err != nil || event != mediaFailed || calls != 3 || archived.MediaFailure == nil || !strings.Contains(archived.MediaFailure.Error, mapper.cfg.MediaDir) {
+		t.Fatalf("retry result: event=%v calls=%d failure=%v err=%v", event, calls, archived.MediaFailure, err)
+	}
+	if !fatalMediaError(context.Canceled) || !fatalMediaError(context.DeadlineExceeded) {
+		t.Fatal("context termination was treated as recoverable")
 	}
 }

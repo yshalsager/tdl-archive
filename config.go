@@ -28,14 +28,21 @@ func loadConfig(path string) (config, error) {
 	if err := yaml.Unmarshal(b, &cfg); err != nil {
 		return cfg, err
 	}
-	if cfg.Group == "" {
-		return cfg, fmt.Errorf("group is required in %s", path)
-	}
-	if cfg.FetchBatchSize < 1 {
-		return cfg, fmt.Errorf("fetch_batch_size must be positive")
-	}
 	if !filepath.IsAbs(cfg.MediaDir) {
 		cfg.MediaDir = filepath.Join(filepath.Dir(path), cfg.MediaDir)
 	}
 	return cfg, nil
+}
+
+func (c config) validate() error {
+	if c.Group == "" {
+		return fmt.Errorf("group is required")
+	}
+	if c.FetchBatchSize < 1 {
+		return fmt.Errorf("fetch_batch_size must be positive")
+	}
+	if c.FetchLimit < 0 {
+		return fmt.Errorf("fetch_limit must be non-negative")
+	}
+	return nil
 }

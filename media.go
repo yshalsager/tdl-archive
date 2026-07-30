@@ -3,10 +3,14 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
+	"time"
 
 	gotddownloader "github.com/gotd/td/telegram/downloader"
 	"github.com/gotd/td/telegram/query/messages"
@@ -20,13 +24,26 @@ import (
 )
 
 type mediaMapper struct {
-	ctx       context.Context
-	ext       *extension.Extension
-	cfg       config
-	overwrite bool
-	pool      dcpool.Pool
-	takeoutID int64
+	ctx        context.Context
+	ext        *extension.Extension
+	cfg        config
+	peerID     int64
+	pool       dcpool.Pool
+	takeoutID  int64
+	downloadFn func(*tmedia.Media, string) error
 }
+
+type mediaEvent int
+
+const (
+	mediaNone mediaEvent = iota
+	mediaDownloaded
+	mediaReused
+	mediaSkipped
+	mediaFailed
+)
+
+var mediaRetryDelay = time.Second
 
 func (m *mediaMapper) close() {
 	if m.pool != nil {
@@ -34,30 +51,24 @@ func (m *mediaMapper) close() {
 	}
 }
 
-func (m *mediaMapper) message(elem messages.Elem) (archiveMessage, error) {
+func (m *mediaMapper) message(elem messages.Elem, overwrite, repair bool) (archiveMessage, mediaEvent, error) {
 	result, rawMedia, err := baseMessage(elem.Msg, elem.Entities, m.cfg.JSONDump)
 	if err != nil {
-		return result, err
+		return result, mediaNone, err
 	}
 	if sticker := stickerText(rawMedia); sticker != "" {
 		result.Content = sticker
 	}
-	result.Media, err = m.media(result.ID, elem.Msg, rawMedia)
-	if err != nil {
-		if m.overwrite {
-			return result, err
-		}
-		m.ext.Log().Warn(fmt.Sprintf("media %d: %v", result.ID, err))
-		result.Media = nil
-	}
-	return result, nil
+	var event mediaEvent
+	result.Media, result.MediaAction, result.MediaFailure, result.ClearMediaFailure, event, err = m.media(result.ID, elem.Msg, rawMedia, overwrite, repair)
+	return result, event, err
 }
 
-func (m *mediaMapper) media(id int, msg tg.NotEmptyMessage, raw tg.MessageMediaClass) (*archiveMedia, error) {
+func (m *mediaMapper) media(id int, msg tg.NotEmptyMessage, raw tg.MessageMediaClass, overwrite, repair bool) (*archiveMedia, mediaAction, *mediaFailure, bool, mediaEvent, error) {
 	switch value := raw.(type) {
 	case *tg.MessageMediaPoll:
 		if len(value.Results.Results) == 0 {
-			return nil, nil
+			return nil, mediaClear, nil, true, mediaNone, nil
 		}
 		counts := map[string]tg.PollAnswerVoters{}
 		for _, result := range value.Results.Results {
@@ -81,25 +92,25 @@ func (m *mediaMapper) media(id int, msg tg.NotEmptyMessage, raw tg.MessageMediaC
 			options = append(options, map[string]any{"label": answer.Text.Text, "count": count, "correct": correct, "percent": percent})
 		}
 		description, _ := json.Marshal(options)
-		return &archiveMedia{ID: id, Type: "poll", Title: value.Poll.Question.Text, Description: string(description)}, nil
+		return &archiveMedia{ID: id, Type: "poll", Title: value.Poll.Question.Text, Description: string(description)}, mediaReplace, nil, true, mediaNone, nil
 	case *tg.MessageMediaWebPage:
 		if page, ok := value.Webpage.(*tg.WebPage); ok {
-			return &archiveMedia{ID: id, Type: "webpage", URL: page.URL, Title: page.Title, Description: page.Description}, nil
+			return &archiveMedia{ID: id, Type: "webpage", URL: page.URL, Title: page.Title, Description: page.Description}, mediaReplace, nil, true, mediaNone, nil
 		}
-	}
-	if !m.cfg.DownloadMedia {
-		return nil, nil
 	}
 	normal, ok := msg.(*tg.Message)
 	if !ok {
-		return nil, nil
+		return nil, mediaClear, nil, true, mediaNone, nil
 	}
 	file, ok := tmedia.GetMedia(normal)
-	if !ok || !m.allowed(raw) {
-		return nil, nil
+	if !ok {
+		return nil, mediaClear, nil, true, mediaNone, nil
+	}
+	if !m.cfg.DownloadMedia || !m.allowed(raw) {
+		return nil, mediaKeep, nil, repair, mediaSkipped, nil
 	}
 	if err := os.MkdirAll(m.cfg.MediaDir, 0o755); err != nil {
-		return nil, err
+		return nil, mediaKeep, nil, false, mediaNone, err
 	}
 	ext := filepath.Ext(filepath.Base(file.Name))
 	if ext == "" || len(ext) > 6 {
@@ -107,16 +118,42 @@ func (m *mediaMapper) media(id int, msg tg.NotEmptyMessage, raw tg.MessageMediaC
 	}
 	name := fmt.Sprintf("%d%s", id, strings.ToLower(ext))
 	path := filepath.Join(m.cfg.MediaDir, name)
-	if m.overwrite || !fileExists(path) {
-		if err := m.download(file, path); err != nil {
-			return nil, fmt.Errorf("download media %d: %w", id, err)
+	if !overwrite && fileExists(path) {
+		return mediaRecord(id, raw, file.Name, name), mediaReplace, nil, true, mediaReused, nil
+	}
+	download := m.download
+	if m.downloadFn != nil {
+		download = m.downloadFn
+	}
+	for attempt := 1; attempt <= 3; attempt++ {
+		err := download(file, path)
+		if err == nil {
+			return mediaRecord(id, raw, file.Name, name), mediaReplace, nil, true, mediaDownloaded, nil
+		}
+		err = fmt.Errorf("peer %d media %d to %s: %w", m.peerID, id, path, err)
+		if fatalMediaError(err) {
+			return nil, mediaKeep, nil, false, mediaNone, err
+		}
+		if attempt == 3 {
+			return nil, mediaKeep, &mediaFailure{Attempts: attempt, Error: err.Error()}, false, mediaFailed, nil
+		}
+		timer := time.NewTimer(time.Duration(attempt) * mediaRetryDelay)
+		select {
+		case <-m.ctx.Done():
+			timer.Stop()
+			return nil, mediaKeep, nil, false, mediaNone, m.ctx.Err()
+		case <-timer.C:
 		}
 	}
-	media := &archiveMedia{ID: id, Type: "photo", URL: name, Title: filepath.Base(file.Name)}
+	panic("unreachable")
+}
+
+func mediaRecord(id int, raw tg.MessageMediaClass, original, name string) *archiveMedia {
+	media := &archiveMedia{ID: id, Type: "photo", URL: name, Title: filepath.Base(original)}
 	if _, ok := raw.(*tg.MessageMediaPhoto); ok {
 		media.Thumb = name
 	}
-	return media, nil
+	return media
 }
 
 func (m *mediaMapper) allowed(raw tg.MessageMediaClass) bool {
@@ -157,6 +194,12 @@ func (m *mediaMapper) download(file *tmedia.Media, path string) error {
 		_ = os.Remove(tmp)
 	}
 	return err
+}
+
+func fatalMediaError(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, fs.ErrPermission) || errors.Is(err, syscall.ENOSPC) ||
+		errors.Is(err, syscall.EROFS) || errors.Is(err, syscall.ENOTDIR) || errors.Is(err, syscall.EIO)
 }
 
 func stickerText(raw tg.MessageMediaClass) string {

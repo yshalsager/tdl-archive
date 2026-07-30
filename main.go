@@ -4,98 +4,193 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/iyear/tdl/extension"
 )
 
+type commandOptions struct {
+	ConfigPath    string
+	DataPath      string
+	Config        config
+	Selection     selection
+	BootstrapPeer bool
+	DryRun        bool
+	JSON          bool
+}
+
 func main() {
+	jsonMode := wantsJSON(os.Args[1:])
+	exitCode := 0
 	extension.New(extension.Options{})(func(ctx context.Context, ext *extension.Extension) error {
-		return run(ctx, ext, os.Args[1:])
+		err := run(ctx, ext, os.Args[1:])
+		if jsonMode && err != nil {
+			exitCode = 1
+			return nil
+		}
+		return err
 	})
+	if exitCode != 0 {
+		os.Exit(exitCode)
+	}
 }
 
 func run(ctx context.Context, ext *extension.Extension, args []string) error {
+	started := time.Now()
+	result := runResult{Version: 1, Status: "failed", ConfigPath: "config.yaml", DataPath: "data.sqlite"}
+	options, err := parseOptions(args)
+	if options != nil {
+		result.ConfigPath, result.DataPath = options.ConfigPath, options.DataPath
+		result.DryRun, result.JSONDump = options.DryRun, options.Config.JSONDump
+	}
+	if err == nil {
+		var store *store
+		store, err = openStore(options.DataPath, options.Config.JSONDump, options.DryRun)
+		if err == nil {
+			defer func() { _ = store.db.Close() }()
+			syncer := &synchronizer{ext: ext, cfg: options.Config, store: store, bootstrapPeer: options.BootstrapPeer, dryRun: options.DryRun}
+			var synced syncResult
+			synced, err = syncer.run(ctx, options.Selection)
+			if syncer.peer.ID != 0 {
+				result.Peer = &syncer.peer
+			}
+			result.DialogTopMessageID = syncer.dialogTopMessageID
+			result.StartingCursor, result.EndingCursor = &synced.StartingCursor, &synced.EndingCursor
+			result.Selected, result.Saved, result.Media = synced.Selected, synced.Saved, synced.Media
+			result.Warnings = synced.Warnings
+			if err == nil && !options.JSON {
+				if options.DryRun {
+					fmt.Printf("would sync %d messages\n", synced.Selected)
+				} else {
+					fmt.Printf("synced %d messages\n", synced.Saved)
+				}
+			}
+		}
+	}
+	result.finish(started, err)
+	if wantsJSON(args) {
+		if outputErr := writeResult(os.Stdout, result); err == nil {
+			err = outputErr
+		}
+	}
+	return err
+}
+
+func parseOptions(args []string) (*commandOptions, error) {
+	options := &commandOptions{ConfigPath: "config.yaml", DataPath: "data.sqlite", JSON: wantsJSON(args)}
 	if len(args) == 0 || args[0] != "sync" {
-		return fmt.Errorf("usage: tdl archive sync [options]")
+		return options, fmt.Errorf("usage: tdl archive sync [options]")
 	}
 	flags := flag.NewFlagSet("sync", flag.ContinueOnError)
-	configPath := flags.String("config", "config.yaml", "tgarchive config path")
-	dataPath := flags.String("data", "data.sqlite", "tgarchive SQLite database path")
-	chat := flags.String("chat", "", "chat ID, username, or title (uses native CLI configuration)")
+	flags.SetOutput(io.Discard)
+	configPath := flags.String("config", options.ConfigPath, "tgarchive config path")
+	dataPath := flags.String("data", options.DataPath, "tgarchive SQLite database path")
+	chat := flags.String("chat", "", "chat ID, username, or title")
 	downloadMedia := flags.Bool("download-media", false, "download attached media")
-	mediaDir := flags.String("media-dir", "", "media directory (default: media)")
+	mediaDir := flags.String("media-dir", "", "media directory")
 	mediaTypes := flags.String("media-type", "", "comma-separated MIME types to download")
 	fetchBatchSize := flags.Int("fetch-batch-size", 100, "messages to process per checkpoint")
-	fetchLimit := flags.Int("fetch-limit", 0, "maximum messages to sync; zero means unlimited")
-	useTakeout := flags.Bool("takeout", false, "use Telegram's takeout API for bulk exports")
-	dryRun := flags.Bool("dry-run", false, "show how many messages would be synced without writing")
+	fetchLimit := flags.Int("fetch-limit", 0, "maximum messages to sync")
+	useTakeout := flags.Bool("takeout", false, "use Telegram's takeout API")
+	dryRun := flags.Bool("dry-run", false, "preview without writing")
 	jsonDump := flags.Bool("json-dump", false, "store raw Telegram JSON")
+	bootstrapPeer := flags.Bool("bootstrap-peer", false, "bind a legacy database to the resolved peer")
+	jsonOutput := flags.Bool("json", false, "emit a machine-readable result")
 	sel := selection{}
-	flags.Var(&sel.IDs, "id", "message ID (repeat or comma-separate)")
+	flags.Var(&sel.IDs, "id", "message ID")
 	flags.IntVar(&sel.FromID, "from-id", 0, "first message ID, inclusive")
 	flags.StringVar(&sel.Type, "type", "", "tdl selector: id, time, or last")
-	flags.Var(&sel.Input, "input", "selector input (comma-separated)")
+	flags.Var(&sel.Input, "input", "selector input")
 	flags.IntVar(&sel.Topic, "topic", 0, "forum topic root message ID")
 	flags.IntVar(&sel.Reply, "reply", 0, "reply thread root message ID")
 	flags.StringVar(&sel.Filter, "filter", "", "tdl expression filter")
 	if err := flags.Parse(normalizeListFlags(args[1:])); err != nil {
-		return err
+		return options, err
 	}
 	if flags.NArg() > 0 {
-		return fmt.Errorf("unexpected arguments: %v", flags.Args())
+		return options, fmt.Errorf("unexpected arguments: %v", flags.Args())
 	}
-	if err := sel.validate(); err != nil {
-		return err
-	}
-	if *fetchBatchSize < 1 {
-		return fmt.Errorf("--fetch-batch-size must be positive")
-	}
-	if *fetchLimit < 0 {
-		return fmt.Errorf("--fetch-limit must be non-negative")
-	}
-	var cfg config
-	var err error
-	if *chat == "" {
-		if *downloadMedia || *mediaDir != "" || *mediaTypes != "" || *fetchBatchSize != 100 || *fetchLimit != 0 || *useTakeout {
-			return fmt.Errorf("native sync options require --chat")
-		}
+	visited := map[string]bool{}
+	flags.Visit(func(value *flag.Flag) { visited[value.Name] = true })
+	options.ConfigPath, options.DataPath = *configPath, *dataPath
+	cfg := config{MediaDir: "media", FetchBatchSize: 100}
+	if *chat == "" || visited["config"] {
+		var err error
 		cfg, err = loadConfig(*configPath)
 		if err != nil {
-			return fmt.Errorf("load config: %w", err)
+			return options, fmt.Errorf("load config: %w", err)
 		}
 	} else {
-		cfg = config{Group: *chat, MediaDir: "media", DownloadMedia: *downloadMedia, FetchBatchSize: *fetchBatchSize, FetchLimit: *fetchLimit, UseTakeout: *useTakeout}
-		if *mediaDir != "" {
-			cfg.MediaDir = *mediaDir
-		}
-		for _, mime := range strings.Split(*mediaTypes, ",") {
-			if mime = strings.TrimSpace(mime); mime != "" {
-				cfg.MediaMIMETypes = append(cfg.MediaMIMETypes, mime)
-			}
-		}
+		options.ConfigPath = ""
 	}
-	if *jsonDump {
-		cfg.JSONDump = true
+	if visited["chat"] {
+		cfg.Group = *chat
+	}
+	if visited["download-media"] {
+		cfg.DownloadMedia = *downloadMedia
+	}
+	if visited["media-dir"] {
+		cfg.MediaDir = *mediaDir
+	}
+	if visited["media-type"] {
+		cfg.MediaMIMETypes = splitList(*mediaTypes)
+	}
+	if visited["fetch-batch-size"] {
+		cfg.FetchBatchSize = *fetchBatchSize
+	}
+	if visited["fetch-limit"] {
+		cfg.FetchLimit = *fetchLimit
+	}
+	if visited["takeout"] {
+		cfg.UseTakeout = *useTakeout
+	}
+	if visited["json-dump"] {
+		cfg.JSONDump = *jsonDump
+	}
+	if err := sel.validate(); err != nil {
+		return options, err
+	}
+	if err := cfg.validate(); err != nil {
+		return options, err
+	}
+	if sel.Explicit && cfg.FetchLimit > 0 {
+		return options, fmt.Errorf("--fetch-limit cannot be combined with an explicit selector")
 	}
 	if *dryRun {
 		cfg.DownloadMedia = false
 	}
-	store, err := openStore(*dataPath, cfg.JSONDump, *dryRun)
-	if err != nil {
-		return fmt.Errorf("open database: %w", err)
-	}
-	defer func() { _ = store.db.Close() }()
-	count, err := (&synchronizer{ext: ext, cfg: cfg, store: store}).run(ctx, sel)
-	if err == nil {
-		if *dryRun {
-			fmt.Printf("would sync %d messages\n", count)
-		} else {
-			fmt.Printf("synced %d messages\n", count)
+	options.Config, options.Selection = cfg, sel
+	options.BootstrapPeer, options.DryRun, options.JSON = *bootstrapPeer, *dryRun, *jsonOutput
+	return options, nil
+}
+
+func wantsJSON(args []string) bool {
+	value := false
+	for _, arg := range args {
+		if arg == "--json" {
+			value = true
+		} else if strings.HasPrefix(arg, "--json=") {
+			parsed, err := strconv.ParseBool(strings.TrimPrefix(arg, "--json="))
+			if err == nil {
+				value = parsed
+			}
 		}
 	}
-	return err
+	return value
+}
+
+func splitList(raw string) []string {
+	result := []string{}
+	for _, value := range strings.Split(raw, ",") {
+		if value = strings.TrimSpace(value); value != "" {
+			result = append(result, value)
+		}
+	}
+	return result
 }
 
 func normalizeListFlags(args []string) []string {

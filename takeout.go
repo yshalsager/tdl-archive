@@ -67,7 +67,7 @@ func uniqueElements(elems []qmessages.Elem) []qmessages.Elem {
 	return result
 }
 
-func (s *synchronizer) runTakeout(ctx context.Context, sel selection, p peers.Peer) (int, error) {
+func (s *synchronizer) runTakeout(ctx context.Context, sel selection, p peers.Peer) (syncResult, error) {
 	request := &tg.AccountInitTakeoutSessionRequest{}
 	switch p := p.(type) {
 	case peers.User:
@@ -82,7 +82,7 @@ func (s *synchronizer) runTakeout(ctx context.Context, sel selection, p peers.Pe
 			request.SetMessageChannels(true)
 		}
 	default:
-		return 0, fmt.Errorf("unsupported takeout peer %T", p)
+		return syncResult{}, fmt.Errorf("unsupported takeout peer %T", p)
 	}
 	if s.cfg.DownloadMedia {
 		request.SetFiles(true)
@@ -91,13 +91,13 @@ func (s *synchronizer) runTakeout(ctx context.Context, sel selection, p peers.Pe
 
 	session, err := s.ext.Client().API().AccountInitTakeoutSession(ctx, request)
 	if err != nil {
-		return 0, fmt.Errorf("init takeout session: %w", err)
+		return syncResult{}, fmt.Errorf("init takeout session: %w", err)
 	}
 	s.takeoutID = session.ID
 	s.takeout = coretakeout.Middleware(session.ID).Handle(s.ext.Client())
 	s.api = tg.NewClient(s.takeout)
 
-	count := 0
+	result := syncResult{}
 	runErr := func() error {
 		var err error
 		s.ranges, err = s.api.MessagesGetSplitRanges(ctx)
@@ -111,7 +111,7 @@ func (s *synchronizer) runTakeout(ctx context.Context, sel selection, p peers.Pe
 		if channel, ok := p.(peers.Channel); ok && isPublicChannel(channel.Raw()) {
 			s.ranges = s.ranges[len(s.ranges)-1:]
 		}
-		count, err = s.sync(ctx, sel, p)
+		result, err = s.sync(ctx, sel, p)
 		return err
 	}()
 
@@ -121,9 +121,9 @@ func (s *synchronizer) runTakeout(ctx context.Context, sel selection, p peers.Pe
 		runErr = errors.Join(runErr, fmt.Errorf("finish takeout session: %w", err))
 	}
 	if runErr != nil {
-		return count, fmt.Errorf("takeout: %w", runErr)
+		return result, fmt.Errorf("takeout: %w", runErr)
 	}
-	return count, nil
+	return result, nil
 }
 
 func isPublicChannel(channel *tg.Channel) bool {

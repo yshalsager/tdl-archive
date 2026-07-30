@@ -22,23 +22,27 @@ import (
 )
 
 type synchronizer struct {
-	ext       *extension.Extension
-	cfg       config
-	store     *store
-	api       *tg.Client
-	takeout   tg.Invoker
-	ranges    []tg.MessageRange
-	takeoutID int64
+	ext                *extension.Extension
+	cfg                config
+	store              *store
+	bootstrapPeer      bool
+	dryRun             bool
+	peer               peerResult
+	dialogTopMessageID *int
+	api                *tg.Client
+	takeout            tg.Invoker
+	ranges             []tg.MessageRange
+	takeoutID          int64
 }
 
 const telegramBatchSize = 100
 
-func (s *synchronizer) run(ctx context.Context, sel selection) (int, error) {
+func (s *synchronizer) run(ctx context.Context, sel selection) (syncResult, error) {
 	api := s.ext.Client().API()
 	manager := peers.Options{}.Build(api)
-	dialogPeer, err := s.loadDialogs(ctx, manager, api)
+	dialogPeer, dialogTop, err := s.loadDialogs(ctx, manager, api)
 	if err != nil {
-		return 0, fmt.Errorf("load dialogs: %w", err)
+		return syncResult{}, fmt.Errorf("load dialogs: %w", err)
 	}
 	var p peers.Peer
 	if dialogPeer != nil {
@@ -47,17 +51,41 @@ func (s *synchronizer) run(ctx context.Context, sel selection) (int, error) {
 		p, err = tutil.GetInputPeer(ctx, manager, s.cfg.Group)
 	}
 	if err != nil {
-		return 0, fmt.Errorf("resolve group: %w", err)
+		return syncResult{}, fmt.Errorf("resolve group: %w", err)
+	}
+	s.peer = peerResult{Selector: s.cfg.Group, Title: p.VisibleName(), ID: int64(p.TDLibPeerID())}
+	s.dialogTopMessageID = dialogTop
+	switch p.(type) {
+	case peers.User:
+		s.peer.Type = "user"
+	case peers.Chat:
+		s.peer.Type = "chat"
+	case peers.Channel:
+		s.peer.Type = "channel"
+	default:
+		return syncResult{}, fmt.Errorf("unsupported peer %T", p)
+	}
+	pendingBootstrap, err := s.store.prepare(s.peer, s.bootstrapPeer)
+	if err != nil {
+		return syncResult{}, fmt.Errorf("prepare database: %w", err)
+	}
+	warnings := []string{}
+	if pendingBootstrap && s.dryRun {
+		warnings = append(warnings, "database peer binding is pending")
 	}
 	if !s.cfg.UseTakeout {
 		s.api = api
-		return s.sync(ctx, sel, p)
+		result, err := s.sync(ctx, sel, p)
+		result.Warnings = append(warnings, result.Warnings...)
+		return result, err
 	}
-	return s.runTakeout(ctx, sel, p)
+	result, err := s.runTakeout(ctx, sel, p)
+	result.Warnings = append(warnings, result.Warnings...)
+	return result, err
 }
 
-func (s *synchronizer) sync(ctx context.Context, sel selection, p peers.Peer) (int, error) {
-	var err error
+func (s *synchronizer) sync(ctx context.Context, sel selection, p peers.Peer) (syncResult, error) {
+	result := syncResult{}
 	baseScope := strconv.FormatInt(p.ID(), 10)
 	scope := baseScope
 	if sel.Topic > 0 {
@@ -68,24 +96,30 @@ func (s *synchronizer) sync(ctx context.Context, sel selection, p peers.Peer) (i
 	if sel.Filter != "" {
 		scope += ":filter:" + sel.Filter
 	}
-	cursor := 0
-	if !sel.Explicit {
-		cursor, err = s.store.cursor(scope, scope == baseScope)
-		if err != nil {
-			return 0, err
-		}
+	cursor, err := s.store.cursor(scope, scope == baseScope)
+	if err != nil {
+		return result, err
 	}
+	result.StartingCursor, result.EndingCursor = cursor, cursor
 
 	var program *vm.Program
 	if sel.Filter != "" {
 		program, err = expr.Compile(sel.Filter, expr.AsBool())
 		if err != nil {
-			return 0, fmt.Errorf("compile filter: %w", err)
+			return result, fmt.Errorf("compile filter: %w", err)
 		}
 	}
 
-	mapper := mediaMapper{ctx: ctx, ext: s.ext, cfg: s.cfg, overwrite: sel.Explicit, takeoutID: s.takeoutID}
+	mapper := mediaMapper{ctx: ctx, ext: s.ext, cfg: s.cfg, peerID: s.peer.ID, takeoutID: s.takeoutID}
 	defer mapper.close()
+	if s.cfg.DownloadMedia {
+		stats, warnings, err := s.retryMediaFailures(ctx, p, &mapper)
+		result.Media = stats
+		result.Warnings = append(result.Warnings, warnings...)
+		if err != nil {
+			return result, err
+		}
+	}
 	total := 0
 	for {
 		limit := 0
@@ -98,14 +132,16 @@ func (s *synchronizer) sync(ctx context.Context, sel selection, p peers.Peer) (i
 		}
 		elems, seen, err := s.collect(ctx, p.InputPeer(), sel, cursor, program, limit)
 		if err != nil {
-			return total, err
+			return result, err
 		}
+		result.Selected += len(elems)
 		messages := make([]archiveMessage, 0, len(elems))
 		for _, elem := range elems {
-			message, err := mapper.message(elem)
+			message, event, err := mapper.message(elem, sel.Explicit, false)
 			if err != nil {
-				return total, err
+				return result, fmt.Errorf("peer %d message %d: %w", s.peer.ID, elem.Msg.GetID(), err)
 			}
+			s.recordMediaEvent(&result.Media, &result.Warnings, message, event)
 			messages = append(messages, message)
 		}
 		var next *int
@@ -114,7 +150,7 @@ func (s *synchronizer) sync(ctx context.Context, sel selection, p peers.Peer) (i
 		}
 		if len(messages) == 0 {
 			if err := s.store.save(nil, scope, next); err != nil {
-				return total, err
+				return result, err
 			}
 		} else {
 			for start := 0; start < len(messages); start += s.cfg.FetchBatchSize {
@@ -124,15 +160,83 @@ func (s *synchronizer) sync(ctx context.Context, sel selection, p peers.Peer) (i
 					batchCursor = next
 				}
 				if err := s.store.save(messages[start:end], scope, batchCursor); err != nil {
-					return total + start, err
+					return result, err
+				}
+				if !s.dryRun {
+					result.Saved += end - start
 				}
 			}
 		}
+		if next != nil {
+			result.EndingCursor = *next
+		}
 		total += len(messages)
 		if !incremental || len(elems) < limit || seen <= cursor || s.cfg.FetchLimit > 0 && total >= s.cfg.FetchLimit {
-			return total, nil
+			pending, err := s.store.pendingMediaFailures()
+			result.Media.Pending = len(pending)
+			if len(pending) > 0 {
+				result.Warnings = append(result.Warnings, fmt.Sprintf("%d media downloads remain pending", len(pending)))
+			}
+			return result, err
 		}
 		cursor = seen
+	}
+}
+
+func (s *synchronizer) retryMediaFailures(ctx context.Context, p peers.Peer, mapper *mediaMapper) (mediaStats, []string, error) {
+	stats := mediaStats{}
+	ids, err := s.store.pendingMediaFailures()
+	if err != nil || len(ids) == 0 {
+		return stats, nil, err
+	}
+	elems, err := s.collectIDs(ctx, s.api, p.InputPeer(), ids, nil)
+	if err != nil {
+		return stats, nil, err
+	}
+	found := map[int]bool{}
+	messages := make([]archiveMessage, 0, len(elems))
+	warnings := []string{}
+	for _, elem := range elems {
+		found[elem.Msg.GetID()] = true
+		message, event, err := mapper.message(elem, true, true)
+		if err != nil {
+			return stats, warnings, fmt.Errorf("retry peer %d message %d: %w", s.peer.ID, elem.Msg.GetID(), err)
+		}
+		s.recordMediaEvent(&stats, &warnings, message, event)
+		messages = append(messages, message)
+	}
+	if err := s.store.save(messages, "", nil); err != nil {
+		return stats, warnings, err
+	}
+	missing := []int{}
+	for _, id := range ids {
+		if !found[id] {
+			missing = append(missing, id)
+			warnings = append(warnings, fmt.Sprintf("media retry message %d is unavailable", id))
+		}
+	}
+	return stats, warnings, s.store.clearMediaFailures(missing)
+}
+
+func (s *synchronizer) recordMediaEvent(stats *mediaStats, warnings *[]string, message archiveMessage, event mediaEvent) {
+	recordMediaEvent(stats, warnings, message, event)
+	if message.MediaFailure != nil {
+		s.ext.Log().Error(message.MediaFailure.Error)
+	}
+}
+
+func recordMediaEvent(stats *mediaStats, warnings *[]string, message archiveMessage, event mediaEvent) {
+	switch event {
+	case mediaDownloaded:
+		stats.Downloaded++
+	case mediaReused:
+		stats.Reused++
+	case mediaSkipped:
+		stats.Skipped++
+	case mediaFailed:
+		stats.Failed++
+		stats.FailedIDs = append(stats.FailedIDs, message.ID)
+		*warnings = append(*warnings, message.MediaFailure.Error)
 	}
 }
 
@@ -197,12 +301,13 @@ func (s *synchronizer) collectFrom(ctx context.Context, api *tg.Client, inputPee
 	return result, seen, nil
 }
 
-func (s *synchronizer) loadDialogs(ctx context.Context, manager *peers.Manager, api *tg.Client) (tg.InputPeerClass, error) {
+func (s *synchronizer) loadDialogs(ctx context.Context, manager *peers.Manager, api *tg.Client) (tg.InputPeerClass, *int, error) {
 	iter := query.GetDialogs(api).BatchSize(telegramBatchSize).Iter()
 	users := map[int64]*tg.User{}
 	chats := map[int64]*tg.Chat{}
 	channels := map[int64]*tg.Channel{}
 	var matched tg.InputPeerClass
+	var topMessageID *int
 	for iter.Next(ctx) {
 		elem := iter.Value()
 		for id, value := range elem.Entities.Users() {
@@ -216,10 +321,12 @@ func (s *synchronizer) loadDialogs(ctx context.Context, manager *peers.Manager, 
 		}
 		if dialogMatches(s.cfg.Group, elem.Dialog.GetPeer(), elem.Entities) {
 			matched = elem.Peer
+			value := elem.Dialog.GetTopMessage()
+			topMessageID = &value
 		}
 	}
 	if err := iter.Err(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	userClasses := make([]tg.UserClass, 0, len(users))
 	chatClasses := make([]tg.ChatClass, 0, len(chats)+len(channels))
@@ -232,7 +339,7 @@ func (s *synchronizer) loadDialogs(ctx context.Context, manager *peers.Manager, 
 	for _, value := range channels {
 		chatClasses = append(chatClasses, value)
 	}
-	return matched, manager.Apply(ctx, userClasses, chatClasses)
+	return matched, topMessageID, manager.Apply(ctx, userClasses, chatClasses)
 }
 
 func dialogMatches(group string, raw tg.PeerClass, entities peer.Entities) bool {
