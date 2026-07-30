@@ -26,7 +26,7 @@ type commandOptions struct {
 func main() {
 	jsonMode := wantsJSON(os.Args[1:])
 	exitCode := 0
-	extension.New(extension.Options{})(func(ctx context.Context, ext *extension.Extension) error {
+	extension.New(extension.Options{Middlewares: floodWaitMiddlewares()})(func(ctx context.Context, ext *extension.Extension) error {
 		err := run(ctx, ext, os.Args[1:])
 		if jsonMode && err != nil {
 			exitCode = 1

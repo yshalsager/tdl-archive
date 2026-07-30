@@ -100,6 +100,10 @@ Takeout mode may require approving Telegram's export request or waiting for the 
 
 Each database is pinned to its resolved Telegram peer. New databases bind automatically; existing unpinned databases require one verified `--bootstrap-peer` run. Dry-run reports the pending binding without writing it.
 
+Username selectors resolve directly without enumerating the account's dialogs. A successful peer binding also caches the peer address in the database, so later runs with the same selector do not resolve it again. Title and numeric selectors retain dialog lookup as a compatibility fallback.
+
+Telegram flood waits longer than 30 seconds fail immediately as `FLOOD_WAIT_LIMIT_EXCEEDED (<seconds>)` instead of being hidden by tdl's automatic waiter. Fleet runners should pace first-time peer resolutions between archives.
+
 Media downloads receive three total attempts. Exhausted per-message failures are stored in a private retry queue while the message and cursor advance; later media-enabled runs retry them automatically. Filesystem, cancellation, and deadline errors remain fatal.
 
 `--json` writes one versioned object to stdout. Fatal handler errors use `status: "failed"` and a non-zero exit code; queued media errors use `status: "completed_with_warnings"` and remain retryable.
@@ -123,6 +127,6 @@ Media downloads receive three total attempts. Exhausted per-message failures are
 }
 ```
 
-The extension writes the existing `messages`, `users`, and `media` tables without otherwise changing their public shape. Its private tables are `sync_state`, `archive_metadata`, and `media_failures`. Existing databases missing `messages.json_dump` are migrated automatically; the column stays null unless enabled.
+The extension writes the existing `messages`, `users`, and `media` tables without otherwise changing their public shape. Its private tables are `sync_state`, `archive_metadata`, `archive_peer_cache`, and `media_failures`. Existing databases missing `messages.json_dump` are migrated automatically; the column stays null unless enabled.
 
 Profile-avatar downloading and Telegram deletion reconciliation are not included yet. Existing avatar paths are preserved when users are updated.

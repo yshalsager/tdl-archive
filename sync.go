@@ -11,6 +11,8 @@ import (
 
 	"github.com/expr-lang/expr"
 	"github.com/expr-lang/expr/vm"
+	"github.com/gotd/td/constant"
+	"github.com/gotd/td/telegram/deeplink"
 	"github.com/gotd/td/telegram/message/peer"
 	"github.com/gotd/td/telegram/peers"
 	"github.com/gotd/td/telegram/query"
@@ -40,20 +42,11 @@ const telegramBatchSize = 100
 func (s *synchronizer) run(ctx context.Context, sel selection) (syncResult, error) {
 	api := s.ext.Client().API()
 	manager := peers.Options{}.Build(api)
-	dialogPeer, dialogTop, err := s.loadDialogs(ctx, manager, api)
-	if err != nil {
-		return syncResult{}, fmt.Errorf("load dialogs: %w", err)
-	}
-	var p peers.Peer
-	if dialogPeer != nil {
-		p, err = manager.FromInputPeer(ctx, dialogPeer)
-	} else {
-		p, err = tutil.GetInputPeer(ctx, manager, s.cfg.Group)
-	}
+	p, dialogTop, err := s.resolvePeer(ctx, manager, api)
 	if err != nil {
 		return syncResult{}, fmt.Errorf("resolve group: %w", err)
 	}
-	s.peer = peerResult{Selector: s.cfg.Group, Title: p.VisibleName(), ID: int64(p.TDLibPeerID())}
+	s.peer = peerResult{Selector: s.cfg.Group, Title: p.VisibleName(), ID: int64(p.TDLibPeerID()), AccessHash: peerAccessHash(p.InputPeer())}
 	s.dialogTopMessageID = dialogTop
 	switch p.(type) {
 	case peers.User:
@@ -82,6 +75,72 @@ func (s *synchronizer) run(ctx context.Context, sel selection) (syncResult, erro
 	result, err := s.runTakeout(ctx, sel, p)
 	result.Warnings = append(warnings, result.Warnings...)
 	return result, err
+}
+
+func (s *synchronizer) resolvePeer(ctx context.Context, manager *peers.Manager, api *tg.Client) (peers.Peer, *int, error) {
+	cached, err := s.store.pinnedPeer()
+	if err != nil {
+		return nil, nil, err
+	}
+	if cached != nil && cached.Selector == s.cfg.Group {
+		p, err := cachedPeer(manager, *cached)
+		return p, nil, err
+	}
+
+	target := strings.TrimPrefix(s.cfg.Group, "@")
+	var usernameErr error
+	if deeplink.ValidateDomain(target) == nil {
+		p, err := manager.ResolveDomain(ctx, target)
+		if err == nil {
+			return p, nil, nil
+		}
+		if strings.HasPrefix(s.cfg.Group, "@") || !tg.IsUsernameNotOccupied(err) && !tg.IsUsernameInvalid(err) {
+			return nil, nil, err
+		}
+		usernameErr = err
+	}
+
+	dialogPeer, dialogTop, err := s.loadDialogs(ctx, manager, api)
+	if err != nil {
+		return nil, nil, fmt.Errorf("load dialogs: %w", err)
+	}
+	if dialogPeer != nil {
+		p, err := manager.FromInputPeer(ctx, dialogPeer)
+		return p, dialogTop, err
+	}
+	if usernameErr != nil {
+		return nil, nil, usernameErr
+	}
+	p, err := tutil.GetInputPeer(ctx, manager, s.cfg.Group)
+	return p, nil, err
+}
+
+func cachedPeer(manager *peers.Manager, cached storedPeer) (peers.Peer, error) {
+	id := constant.TDLibPeerID(cached.ID).ToPlain()
+	if id == 0 {
+		return nil, fmt.Errorf("invalid cached peer ID %d", cached.ID)
+	}
+	switch cached.Type {
+	case "user":
+		return manager.User(&tg.User{ID: id, AccessHash: cached.AccessHash, FirstName: cached.Title}), nil
+	case "chat":
+		return manager.Chat(&tg.Chat{ID: id, Title: cached.Title}), nil
+	case "channel":
+		return manager.Channel(&tg.Channel{ID: id, AccessHash: cached.AccessHash, Title: cached.Title}), nil
+	default:
+		return nil, fmt.Errorf("unsupported cached peer type %q", cached.Type)
+	}
+}
+
+func peerAccessHash(input tg.InputPeerClass) int64 {
+	switch value := input.(type) {
+	case *tg.InputPeerUser:
+		return value.AccessHash
+	case *tg.InputPeerChannel:
+		return value.AccessHash
+	default:
+		return 0
+	}
 }
 
 func (s *synchronizer) sync(ctx context.Context, sel selection, p peers.Peer) (syncResult, error) {
@@ -304,43 +363,31 @@ func (s *synchronizer) collectFrom(ctx context.Context, api *tg.Client, inputPee
 
 func (s *synchronizer) loadDialogs(ctx context.Context, manager *peers.Manager, api *tg.Client) (tg.InputPeerClass, *int, error) {
 	iter := query.GetDialogs(api).BatchSize(telegramBatchSize).Iter()
-	users := map[int64]*tg.User{}
-	chats := map[int64]*tg.Chat{}
-	channels := map[int64]*tg.Channel{}
-	var matched tg.InputPeerClass
-	var topMessageID *int
 	for iter.Next(ctx) {
 		elem := iter.Value()
-		for id, value := range elem.Entities.Users() {
-			users[id] = value
-		}
-		for id, value := range elem.Entities.Chats() {
-			chats[id] = value
-		}
-		for id, value := range elem.Entities.Channels() {
-			channels[id] = value
-		}
 		if dialogMatches(s.cfg.Group, elem.Dialog.GetPeer(), elem.Entities) {
-			matched = elem.Peer
+			users := make([]tg.UserClass, 0, len(elem.Entities.Users()))
+			chats := make([]tg.ChatClass, 0, len(elem.Entities.Chats())+len(elem.Entities.Channels()))
+			for _, value := range elem.Entities.Users() {
+				users = append(users, value)
+			}
+			for _, value := range elem.Entities.Chats() {
+				chats = append(chats, value)
+			}
+			for _, value := range elem.Entities.Channels() {
+				chats = append(chats, value)
+			}
+			if err := manager.Apply(ctx, users, chats); err != nil {
+				return nil, nil, err
+			}
 			value := elem.Dialog.GetTopMessage()
-			topMessageID = &value
+			return elem.Peer, &value, nil
 		}
 	}
 	if err := iter.Err(); err != nil {
 		return nil, nil, err
 	}
-	userClasses := make([]tg.UserClass, 0, len(users))
-	chatClasses := make([]tg.ChatClass, 0, len(chats)+len(channels))
-	for _, value := range users {
-		userClasses = append(userClasses, value)
-	}
-	for _, value := range chats {
-		chatClasses = append(chatClasses, value)
-	}
-	for _, value := range channels {
-		chatClasses = append(chatClasses, value)
-	}
-	return matched, topMessageID, manager.Apply(ctx, userClasses, chatClasses)
+	return nil, nil, nil
 }
 
 func dialogMatches(group string, raw tg.PeerClass, entities peer.Entities) bool {

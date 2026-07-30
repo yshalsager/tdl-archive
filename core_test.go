@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,8 +14,10 @@ import (
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/message/peer"
+	"github.com/gotd/td/telegram/peers"
 	"github.com/gotd/td/telegram/query/messages"
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 	"github.com/iyear/tdl/core/tmedia"
 )
 
@@ -45,7 +48,7 @@ func TestSelectionAndStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = db.db.Close() }()
-	identity := peerResult{ID: -1009, Type: "channel"}
+	identity := peerResult{Selector: "channel", ID: -1000000000009, Type: "channel", Title: "Channel", AccessHash: 99}
 	if _, err := db.prepare(identity, false); err != nil {
 		t.Fatal(err)
 	}
@@ -247,11 +250,18 @@ func TestIdentityAndMediaFailures(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = store.db.Close() }()
-	identity := peerResult{ID: -1009, Type: "channel"}
+	identity := peerResult{Selector: "channel", ID: -1000000000009, Type: "channel", Title: "Channel", AccessHash: 99}
 	if _, err := store.prepare(identity, false); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.prepare(peerResult{ID: -1010, Type: "channel"}, false); err == nil || !strings.Contains(err.Error(), "pinned") {
+	cached, err := store.pinnedPeer()
+	if err != nil || cached == nil || cached.ID != identity.ID || cached.AccessHash != identity.AccessHash {
+		t.Fatalf("cached peer=%+v err=%v", cached, err)
+	}
+	if p, err := cachedPeer(peers.Options{}.Build(nil), *cached); err != nil || p.InputPeer().(*tg.InputPeerChannel).AccessHash != identity.AccessHash {
+		t.Fatalf("reconstructed peer=%+v err=%v", p, err)
+	}
+	if _, err := store.prepare(peerResult{ID: -1000000000010, Type: "channel"}, false); err == nil || !strings.Contains(err.Error(), "pinned") {
 		t.Fatalf("peer mismatch accepted: %v", err)
 	}
 	now := time.Now().UTC()
@@ -283,6 +293,41 @@ func TestIdentityAndMediaFailures(t *testing.T) {
 	}
 	if ids, err := store.pendingMediaFailures(); err != nil || len(ids) != 0 {
 		t.Fatalf("failure was not cleared: ids=%v err=%v", ids, err)
+	}
+}
+
+func TestPeerResolutionAndFloodWait(t *testing.T) {
+	archiveStore, err := openStore(filepath.Join(t.TempDir(), "data.sqlite"), false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = archiveStore.db.Close() }()
+	calls := 0
+	api := tg.NewClient(telegram.InvokeFunc(func(_ context.Context, input bin.Encoder, output bin.Decoder) error {
+		request, ok := input.(*tg.ContactsResolveUsernameRequest)
+		if !ok || request.Username != "Ktbalbadr" {
+			return fmt.Errorf("unexpected request %T", input)
+		}
+		calls++
+		*output.(*tg.ContactsResolvedPeer) = tg.ContactsResolvedPeer{
+			Peer:  &tg.PeerChannel{ChannelID: 9},
+			Chats: []tg.ChatClass{&tg.Channel{ID: 9, AccessHash: 99, Title: "Channel"}},
+		}
+		return nil
+	}))
+	syncer := synchronizer{cfg: config{Group: "Ktbalbadr"}, store: archiveStore}
+	p, _, err := syncer.resolvePeer(context.Background(), peers.Options{}.Build(api), api)
+	if err != nil || calls != 1 || p.ID() != 9 {
+		t.Fatalf("direct username resolution: peer=%+v calls=%d err=%v", p, calls, err)
+	}
+
+	flood := tgerr.New(420, tgerr.ErrFloodWait)
+	flood.Argument = 60
+	limited := floodWaitMiddlewares()[0].Handle(telegram.InvokeFunc(func(context.Context, bin.Encoder, bin.Decoder) error { return flood }))
+	err = limited.Invoke(context.Background(), &tg.ContactsResolveUsernameRequest{}, &tg.ContactsResolvedPeer{})
+	rpcError, businessError := tgerr.As(err)
+	if _, hidden := tgerr.AsFloodWait(err); hidden || !businessError || rpcError.Type != floodWaitLimitExceeded || rpcError.Argument != 60 {
+		t.Fatalf("long flood wait was not surfaced: %v", err)
 	}
 }
 

@@ -8,10 +8,11 @@ import (
 )
 
 type peerResult struct {
-	Selector string `json:"selector"`
-	Title    string `json:"title"`
-	Type     string `json:"type"`
-	ID       int64  `json:"id"`
+	Selector   string `json:"selector"`
+	Title      string `json:"title"`
+	Type       string `json:"type"`
+	ID         int64  `json:"id"`
+	AccessHash int64  `json:"-"`
 }
 
 type mediaStats struct {

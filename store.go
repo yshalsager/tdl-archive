@@ -35,6 +35,10 @@ CREATE TABLE IF NOT EXISTS archive_metadata (
   id INTEGER NOT NULL PRIMARY KEY CHECK(id = 1),
   peer_id INTEGER NOT NULL, peer_type TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS archive_peer_cache (
+  id INTEGER NOT NULL PRIMARY KEY CHECK(id = 1),
+  peer_selector TEXT NOT NULL, peer_title TEXT NOT NULL, peer_access_hash INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS media_failures (
   message_id INTEGER NOT NULL PRIMARY KEY,
   attempts INTEGER NOT NULL, last_error TEXT NOT NULL
@@ -87,6 +91,12 @@ type store struct {
 	existing bool
 }
 
+type storedPeer struct {
+	ID, AccessHash int64
+	Type, Selector string
+	Title          string
+}
+
 func openStore(path string, jsonDump, dryRun bool) (*store, error) {
 	_, statErr := os.Stat(path)
 	existing := statErr == nil
@@ -122,6 +132,9 @@ func (s *store) prepare(peer peerResult, bootstrap bool) (bool, error) {
 		}
 		if !s.dryRun {
 			if _, err = s.db.Exec(schema); err == nil {
+				err = s.savePeerCache(peer)
+			}
+			if err == nil {
 				err = s.ensureJSONDump()
 			}
 		}
@@ -147,8 +160,10 @@ func (s *store) prepare(peer peerResult, bootstrap bool) (bool, error) {
 	if err = s.ensureJSONDump(); err != nil {
 		return pending, err
 	}
-	_, err = s.db.Exec("INSERT INTO archive_metadata(id, peer_id, peer_type) VALUES(1, ?, ?)", peer.ID, peer.Type)
-	return pending, err
+	if _, err = s.db.Exec("INSERT INTO archive_metadata(id, peer_id, peer_type) VALUES(1, ?, ?)", peer.ID, peer.Type); err != nil {
+		return pending, err
+	}
+	return pending, s.savePeerCache(peer)
 }
 
 func (s *store) ensureJSONDump() error {
@@ -173,6 +188,28 @@ func (s *store) ensureJSONDump() error {
 	}
 	_, err = s.db.Exec("ALTER TABLE messages ADD COLUMN json_dump JSON")
 	return err
+}
+
+func (s *store) savePeerCache(peer peerResult) error {
+	_, err := s.db.Exec(`INSERT INTO archive_peer_cache(id, peer_selector, peer_title, peer_access_hash) VALUES(1, ?, ?, ?)
+ON CONFLICT(id) DO UPDATE SET peer_selector=excluded.peer_selector, peer_title=excluded.peer_title, peer_access_hash=excluded.peer_access_hash`, peer.Selector, peer.Title, peer.AccessHash)
+	return err
+}
+
+func (s *store) pinnedPeer() (*storedPeer, error) {
+	peer := &storedPeer{}
+	err := s.db.QueryRow(`SELECT m.peer_id, m.peer_type, c.peer_selector, c.peer_title, c.peer_access_hash
+FROM archive_metadata m JOIN archive_peer_cache c ON c.id = m.id WHERE m.id = 1`).Scan(&peer.ID, &peer.Type, &peer.Selector, &peer.Title, &peer.AccessHash)
+	if err == sql.ErrNoRows || err != nil && strings.Contains(err.Error(), "no such table") {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if peer.AccessHash == 0 && peer.Type != "chat" {
+		return nil, nil
+	}
+	return peer, nil
 }
 
 func (s *store) cursor(scope string, useExistingMessages bool) (int, error) {
