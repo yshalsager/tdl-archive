@@ -251,6 +251,15 @@ func TestIdentityAndMediaFailures(t *testing.T) {
 	}
 	defer func() { _ = store.db.Close() }()
 	identity := peerResult{Selector: "channel", ID: -1000000000009, Type: "channel", Title: "Channel", AccessHash: 99, Flags: channelMegagroup | channelPublic}
+	if _, err := store.db.Exec(`CREATE TABLE archive_metadata(id INTEGER PRIMARY KEY, peer_id INTEGER, peer_type TEXT);
+INSERT INTO archive_metadata VALUES(1, -1000000000009, 'channel');
+CREATE TABLE archive_peer_cache(id INTEGER PRIMARY KEY, peer_selector TEXT, peer_title TEXT, peer_access_hash INTEGER);
+INSERT INTO archive_peer_cache VALUES(1, 'channel', 'Channel', 99);`); err != nil {
+		t.Fatal(err)
+	}
+	if cached, err := store.pinnedPeer(); err != nil || cached != nil {
+		t.Fatalf("old cache was not treated as a miss: %+v err=%v", cached, err)
+	}
 	if _, err := store.prepare(identity, false); err != nil {
 		t.Fatal(err)
 	}

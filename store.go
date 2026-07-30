@@ -193,8 +193,24 @@ func (s *store) ensureJSONDump() error {
 }
 
 func (s *store) savePeerCache(peer peerResult) error {
+	if err := s.ensurePeerFlags(); err != nil {
+		return err
+	}
 	_, err := s.db.Exec(`INSERT INTO archive_peer_cache(id, peer_selector, peer_title, peer_access_hash, peer_flags) VALUES(1, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET peer_selector=excluded.peer_selector, peer_title=excluded.peer_title, peer_access_hash=excluded.peer_access_hash, peer_flags=excluded.peer_flags`, peer.Selector, peer.Title, peer.AccessHash, peer.Flags)
+	return err
+}
+
+func (s *store) ensurePeerFlags() error {
+	var flags int
+	err := s.db.QueryRow("SELECT peer_flags FROM archive_peer_cache LIMIT 1").Scan(&flags)
+	if err == nil || err == sql.ErrNoRows {
+		return nil
+	}
+	if !strings.Contains(err.Error(), "no such column: peer_flags") {
+		return err
+	}
+	_, err = s.db.Exec("ALTER TABLE archive_peer_cache ADD COLUMN peer_flags INTEGER NOT NULL DEFAULT 0")
 	return err
 }
 
@@ -202,7 +218,7 @@ func (s *store) pinnedPeer() (*storedPeer, error) {
 	peer := &storedPeer{}
 	err := s.db.QueryRow(`SELECT m.peer_id, m.peer_type, c.peer_selector, c.peer_title, c.peer_access_hash, c.peer_flags
 FROM archive_metadata m JOIN archive_peer_cache c ON c.id = m.id WHERE m.id = 1`).Scan(&peer.ID, &peer.Type, &peer.Selector, &peer.Title, &peer.AccessHash, &peer.Flags)
-	if err == sql.ErrNoRows || err != nil && strings.Contains(err.Error(), "no such table") {
+	if err == sql.ErrNoRows || err != nil && (strings.Contains(err.Error(), "no such table") || strings.Contains(err.Error(), "no such column")) {
 		return nil, nil
 	}
 	if err != nil {
