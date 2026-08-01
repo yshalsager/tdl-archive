@@ -119,7 +119,7 @@ func (m *mediaMapper) media(id int, msg tg.NotEmptyMessage, raw tg.MessageMediaC
 	}
 	if validFile(path, file.Size) {
 		if m.cfg.DownloadMedia {
-			if err := os.Chmod(path, 0o644); err != nil {
+			if err := chmodValidFile(path, file.Size); err != nil {
 				return nil, mediaKeep, nil, false, mediaNone, err
 			}
 		}
@@ -146,7 +146,7 @@ func (m *mediaMapper) media(id int, msg tg.NotEmptyMessage, raw tg.MessageMediaC
 	for attempt := 1; attempt <= 3; attempt++ {
 		err := download(file, path)
 		if err == nil && validFile(path, file.Size) {
-			if err := os.Chmod(path, 0o644); err != nil {
+			if err := chmodValidFile(path, file.Size); err != nil {
 				return nil, mediaKeep, nil, false, mediaNone, err
 			}
 			return mediaRecord(id, raw, file.Name, url), mediaReplace, nil, true, mediaDownloaded, nil
@@ -187,8 +187,43 @@ func sourceMediaKey(location tg.InputFileLocationClass) string {
 }
 
 func validFile(path string, size int64) bool {
-	info, err := os.Stat(path)
-	return err == nil && info.Mode().IsRegular() && info.Size() == size
+	file, err := openValidFile(path, size)
+	if err != nil {
+		return false
+	}
+	return file.Close() == nil
+}
+
+func openValidFile(path string, size int64) (*os.File, error) {
+	before, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !before.Mode().IsRegular() || before.Size() != size {
+		return nil, &os.PathError{Op: "validate", Path: path, Err: errors.New("not a regular file of the expected size")}
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	after, err := file.Stat()
+	if err != nil || !os.SameFile(before, after) || !after.Mode().IsRegular() || after.Size() != size {
+		_ = file.Close()
+		if err != nil {
+			return nil, err
+		}
+		return nil, &os.PathError{Op: "validate", Path: path, Err: errors.New("file changed during validation")}
+	}
+	return file, nil
+}
+
+func chmodValidFile(path string, size int64) error {
+	file, err := openValidFile(path, size)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = file.Close() }()
+	return file.Chmod(0o644)
 }
 
 func storedSourceKey(raw string) string {
@@ -251,14 +286,21 @@ func (m *mediaMapper) adoptLegacy(id int, key string, stored storedMedia, path s
 		return false, err
 	}
 	if err := os.Link(legacy, path); err == nil {
-		if err := os.Chmod(path, 0o644); err != nil {
-			_ = os.Remove(path)
-			return false, err
+		linked, err := openValidFile(path, size)
+		if err == nil {
+			err = linked.Chmod(0o644)
 		}
-		linked, err := os.Open(path)
 		if err == nil {
 			err = linked.Sync()
-			_ = linked.Close()
+		}
+		if linked != nil {
+			if closeErr := linked.Close(); err == nil {
+				err = closeErr
+			}
+		}
+		if err != nil {
+			_ = os.Remove(path)
+			return false, err
 		}
 		if err == nil {
 			err = syncDirectory(filepath.Dir(path))
@@ -293,7 +335,7 @@ func (m *mediaMapper) download(file *tmedia.Media, path string) error {
 
 func publishFile(path string, size int64, write func(*os.File) error) error {
 	if validFile(path, size) {
-		return os.Chmod(path, 0o644)
+		return chmodValidFile(path, size)
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err

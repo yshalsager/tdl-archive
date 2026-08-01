@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -629,6 +630,31 @@ func TestMediaIntegrityAndPolls(t *testing.T) {
 	} else if info.Mode().Perm() != 0o644 || info.Size() != 3 {
 		t.Fatalf("published media=%v", info)
 	}
+	if runtime.GOOS != "windows" {
+		secretPath := filepath.Join(dir, "secret.bin")
+		linkedPath := filepath.Join(dir, "linked.bin")
+		if err := os.WriteFile(secretPath, []byte("old"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(secretPath, linkedPath); err != nil {
+			t.Fatal(err)
+		}
+		if err := chmodValidFile(linkedPath, 3); err == nil {
+			t.Fatal("symlinked media was accepted")
+		}
+		if err := publishFile(linkedPath, 3, func(file *os.File) error {
+			_, err := file.Write([]byte("new"))
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if info, err := os.Stat(secretPath); err != nil || info.Mode().Perm() != 0o600 {
+			t.Fatalf("symlink target mode changed: info=%v err=%v", info, err)
+		}
+		if info, err := os.Lstat(linkedPath); err != nil || !info.Mode().IsRegular() {
+			t.Fatalf("symlink was not safely replaced: info=%v err=%v", info, err)
+		}
+	}
 
 	disabledMessage := &tg.Message{ID: 9, Date: 1, PeerID: &tg.PeerChannel{ChannelID: 9}}
 	disabledMessage.SetMedia(photo)
@@ -844,7 +870,9 @@ func TestReconcileArchive(t *testing.T) {
 	syncer := synchronizer{store: archiveStore, cfg: config{FetchBatchSize: 2}, peer: identity, reconcile: true}
 	result := syncResult{}
 	mapper := mediaMapper{ctx: context.Background()}
-	if err := syncer.reconcileArchive(context.Background(), api, p, &mapper, &result, until); err != nil {
+	syncer.api = api
+	result, err = syncer.complete(context.Background(), p, &mapper, result, until, 0)
+	if err != nil {
 		t.Fatal(err)
 	}
 	if result.Reconciled != 1 || result.Missing != 1 || fmt.Sprint(requested) != "[1 2]" {

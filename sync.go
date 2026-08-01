@@ -312,8 +312,7 @@ func (s *synchronizer) complete(ctx context.Context, p peers.Peer, mapper *media
 	if s.dryRun {
 		return result, nil
 	}
-	api := s.ext.Client().API()
-	if err := s.reconcileArchive(ctx, api, p, mapper, &result, reconcileUntil); err != nil {
+	if err := s.reconcileArchive(ctx, s.api, p, mapper, &result, reconcileUntil); err != nil {
 		return result, err
 	}
 	if s.cfg.DownloadMedia {
@@ -322,7 +321,7 @@ func (s *synchronizer) complete(ctx context.Context, p peers.Peer, mapper *media
 			return result, err
 		}
 		if len(retryIDs) > 0 {
-			if err := s.retryMediaFailures(ctx, api, p, mapper, &result, retryIDs); err != nil {
+			if err := s.retryMediaFailures(ctx, s.api, p, mapper, &result, retryIDs); err != nil {
 				return result, err
 			}
 		}
