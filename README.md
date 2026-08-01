@@ -30,9 +30,9 @@ mise run release
 
 ## Sync
 
-Sync directly with native CLI options, or use an existing [`tg-archive`](https://github.com/knadh/tg-archive) `config.yaml`. Explicit CLI options override loaded config values. Authentication, session storage, proxy settings, and connection pooling always come from tdl; `api_id`, `api_hash`, and `proxy` in the tg-archive config are ignored.
+Use native options or an existing [`tg-archive`](https://github.com/knadh/tg-archive) `config.yaml`. Explicit CLI options override config values. Authentication, sessions, proxies, and connection pooling always come from `tdl`; Telegram credentials in the tg-archive config are ignored.
 
-Raw Telegram JSON is disabled by default. Add `json_dump: true` to the config or pass `--json-dump` to populate the nullable `messages.json_dump` column.
+Every archived message stores its raw Telegram JSON. This is an archive invariant, not an optional mode.
 
 ```sh
 # Native configuration; no config.yaml is needed.
@@ -45,16 +45,17 @@ tdl archive sync --chat @group --fetch-batch-size 500 --takeout
 tdl archive sync --config config.yaml
 tdl archive sync --config config.yaml --fetch-limit 100
 
-# Continue after the saved cursor (or the greatest existing message ID).
+# Continue from the durable whole-chat cursor.
 tdl archive sync
 
-# Preview the same selection without changing the database or downloading media.
+# Refresh all archived messages, record edits, and record missing messages.
+tdl archive sync --reconcile --fetch-wait 1
+
+# Preview the selected history without writing or downloading media.
 tdl archive sync --dry-run
 
-# Replace exact messages in the DB and replace their media files.
+# Refresh exact messages without moving the normal cursor.
 tdl archive sync --id 120 121 140
-
-# Replace everything from an ID through the latest message.
 tdl archive sync --from-id 120
 
 # tdl-native selectors.
@@ -66,48 +67,60 @@ tdl archive sync --type last --input 100
 tdl archive sync --topic 42 --type last --input 100
 tdl archive sync --reply 42 --filter 'Media.Size > 0'
 
-# Bind an existing unpinned database after verifying the resolved peer.
-tdl archive sync --config config.yaml --bootstrap-peer --fetch-limit 100
+# Bind a verified legacy database, then repair old projections.
+tdl archive sync --config config.yaml --bootstrap-peer --reconcile
 
 # Emit one machine-readable result.
-tdl archive sync --config config.yaml --dry-run --json
+tdl archive sync --config config.yaml --json
 ```
 
 Options:
 
 - `--config`: config path, default `config.yaml`
 - `--data`: SQLite path, default `data.sqlite`
-- `--chat`: chat ID, username, or title; enables native CLI configuration without `config.yaml`
+- `--chat`: `@username`, bare username, unambiguous dialog title, or canonical TDLib peer ID
 - `--download-media`: override attached-media downloading
 - `--media-dir`: override the media directory
 - `--media-type`: override the comma-separated MIME filter
-- `--fetch-batch-size`: override messages processed per database checkpoint; Telegram requests remain capped at `100`
-- `--fetch-limit`: maximum incremental messages to sync; zero means unlimited and explicit selectors reject a nonzero limit
-- `--fetch-wait`: seconds to wait between full incremental batches
-- `--takeout`: override Telegram takeout mode
-- `--dry-run`: report how many messages would be synced without writing the database or downloading media
+- `--fetch-batch-size`: messages per database checkpoint and maintenance batch; Telegram requests remain capped at `100`
+- `--fetch-limit`: maximum incremental messages; explicit selectors reject a nonzero limit
+- `--fetch-wait`: seconds between full history or reconciliation batches
+- `--takeout`: use Telegram's takeout API
+- `--dry-run`: preview primary selection without writes, media, retries, or reconciliation
+- `--reconcile`: continue a complete, checkpointed archive reconciliation
 - `--id`: exact IDs; repeat, comma-separate, or space-separate them
 - `--from-id`: inclusive lower ID
 - `--type id|time|last` with `--input`
 - `--topic` or `--reply`: mutually exclusive thread roots
 - `--filter`: a [tdl expression](https://docs.iyear.me/tdl/guide/expr/)
-- `--json-dump`: store raw Telegram JSON
-- `--bootstrap-peer`: bind an existing unpinned database to the resolved peer
+- `--bootstrap-peer`: bind a legacy database to the resolved account and peer
 - `--json`: emit a versioned JSON result
 
-Primary selectors are mutually exclusive. Explicit selectors upsert every selected message and atomically replace existing media. They do not move the normal incremental cursor.
+Primary selectors are mutually exclusive. Explicit selectors upsert their selected messages but never move the whole-chat cursor.
 
-Takeout mode may require approving Telegram's export request or waiting for the delay reported by Telegram. The sync fails rather than silently falling back to standard mode.
+## Archive invariants
 
-Each database is pinned to its resolved Telegram peer. New databases bind automatically; existing unpinned databases require one verified `--bootstrap-peer` run. Dry-run reports the pending binding without writing it.
+Each database is bound to both the authenticated Telegram account and one canonical peer. A later account or peer mismatch fails before archive writes. New databases bind automatically. A nonempty legacy database requires one explicit `--bootstrap-peer` run. An unpinned tg-archive database seeds its whole-chat cursor from its greatest existing message ID exactly once. A database pinned by an older plugin preserves its durable whole-chat cursor while adding the account binding; if that cursor is absent, synchronization starts from zero. Run the upgrade with `--reconcile` to refresh legacy projections and detect missing messages. After that, cursors come only from `sync_state` and are never inferred from archived rows.
 
-Username selectors resolve directly without enumerating the account's dialogs. A successful peer binding also caches the peer address in the database, so later runs with the same selector do not resolve it again. Title and numeric selectors retain dialog lookup as a compatibility fallback.
+The pinned peer cache is used before Telegram resolution. On first binding, `@username` and syntactically valid bare usernames resolve directly. Numeric selectors are canonical TDLib peer IDs; they resolve directly when Telegram already knows the access hash and otherwise use one binding-time dialog scan. Only remaining title selectors scan dialogs and must be unambiguous. Responses owned by another peer are rejected. Cross-peer reply targets, including linked-discussion links, are omitted because tg-archive's message-ID-only schema cannot represent them safely.
 
-Telegram flood waits longer than 30 seconds fail immediately as `FLOOD_WAIT_LIMIT_EXCEEDED (<seconds>)` instead of being hidden by tdl's automatic waiter. Fleet runners should pace first-time peer resolutions between archives.
+A basic group migration is persisted as a hard archive boundary. The old basic-group archive may continue fetching and reconciling its pre-migration history; once an ordinary history sync reaches Telegram's end, it fails with the migrated supergroup's canonical ID. Continue that supergroup in a separate database.
 
-Media downloads receive three total attempts. Exhausted per-message failures are stored in a private retry queue while the message and cursor advance; later media-enabled runs retry them automatically. Filesystem, cancellation, and deadline errors remain fatal.
+`--reconcile` imports new history first, then continues a checkpointed oldest-to-newest pass until the complete archive has been checked. Changes to archived message content preserve the previous raw payload in `message_revisions`. Missing messages receive a durable `message_tombstones` record while their archived content remains intact. Schedule it periodically; forward message IDs alone cannot reveal Telegram edits or messages that disappear.
 
-`--json` writes one versioned object to stdout. Fatal handler errors use `status: "failed"` and a non-zero exit code; queued media errors use `status: "completed_with_warnings"` and remain retryable.
+## Media durability
+
+Media objects are immutable and peer-namespaced. Their paths contain the message ID, Telegram media ID, and expected size. A legacy object attached to the same archived message is adopted locally when its size and, when available, stored Telegram media ID match. Published files are mode `0644`, size-checked, synced, and renamed from a unique temporary file after Telegram hash verification. Run `--reconcile` after enabling downloads or widening the MIME filter to backfill older messages.
+
+Use absolute `--data` and `--media-dir` paths for unattended services. Run one writer per database and media directory; the archive is sequential by design. Back up the SQLite database and its media directory together.
+
+Recoverable media downloads receive up to three attempts. Exhausted network failures are committed with the message and cursor, then retried in bounded fair batches after new messages have been archived. A message already attempted by primary sync or reconciliation is not retried again in the same run. Missing retry sources become durable unavailable records rather than disappearing. Local filesystem errors, cancellation, deadlines, and excessive flood waits remain fatal.
+
+Takeout mode never silently falls back to ordinary history. Telegram may require approving an export request or waiting for its reported delay.
+
+## Results
+
+`--json` writes one versioned object to stdout. Fatal errors use `status: "failed"` and a nonzero exit code. Pending or unavailable media uses `status: "completed_with_warnings"`.
 
 ```json
 {
@@ -122,12 +135,14 @@ Media downloads receive three total attempts. Exhausted per-message failures are
   "dialog_top_message_id": 110,
   "selected": 10,
   "saved": 10,
-  "media": {"downloaded": 2, "reused": 1, "skipped": 0, "failed": 0, "pending": 0},
+  "reconciled": 100,
+  "missing": 1,
+  "media": {"downloaded": 2, "reused": 1, "skipped": 0, "failed": 0, "pending": 0, "unavailable": 0},
   "json_dump": true,
   "duration_ms": 1234
 }
 ```
 
-The extension writes the existing `messages`, `users`, and `media` tables without otherwise changing their public shape. Its private tables are `sync_state`, `archive_metadata`, `archive_peer_cache`, and `media_failures`. Existing databases missing `messages.json_dump` are migrated automatically; the column stays null unless enabled.
+The public `messages`, `users`, and `media` shape remains compatible with tg-archive. Private state lives in `sync_state`, `archive_metadata`, `archive_peer_cache`, `media_failures`, `message_revisions`, and `message_tombstones`. Existing compatible databases are migrated transactionally.
 
-Profile-avatar downloading and Telegram deletion reconciliation are not included yet. Existing avatar paths are preserved when users are updated.
+Profile-avatar downloading is not included. Existing avatar paths are preserved when users are refreshed.

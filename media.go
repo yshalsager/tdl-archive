@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -30,6 +33,7 @@ type mediaMapper struct {
 	peerID     int64
 	pool       dcpool.Pool
 	takeoutID  int64
+	existing   map[int]storedMedia
 	downloadFn func(*tmedia.Media, string) error
 }
 
@@ -51,8 +55,8 @@ func (m *mediaMapper) close() {
 	}
 }
 
-func (m *mediaMapper) message(elem messages.Elem, overwrite, repair bool) (archiveMessage, mediaEvent, error) {
-	result, rawMedia, err := baseMessage(elem.Msg, elem.Entities, m.cfg.JSONDump)
+func (m *mediaMapper) message(elem messages.Elem) (archiveMessage, mediaEvent, error) {
+	result, rawMedia, err := baseMessage(elem.Msg, elem.Entities)
 	if err != nil {
 		return result, mediaNone, err
 	}
@@ -60,16 +64,13 @@ func (m *mediaMapper) message(elem messages.Elem, overwrite, repair bool) (archi
 		result.Content = sticker
 	}
 	var event mediaEvent
-	result.Media, result.MediaAction, result.MediaFailure, result.ClearMediaFailure, event, err = m.media(result.ID, elem.Msg, rawMedia, overwrite, repair)
+	result.Media, result.MediaAction, result.MediaFailure, result.ClearMediaFailure, event, err = m.media(result.ID, elem.Msg, rawMedia)
 	return result, event, err
 }
 
-func (m *mediaMapper) media(id int, msg tg.NotEmptyMessage, raw tg.MessageMediaClass, overwrite, repair bool) (*archiveMedia, mediaAction, *mediaFailure, bool, mediaEvent, error) {
+func (m *mediaMapper) media(id int, msg tg.NotEmptyMessage, raw tg.MessageMediaClass) (*archiveMedia, mediaAction, *mediaFailure, bool, mediaEvent, error) {
 	switch value := raw.(type) {
 	case *tg.MessageMediaPoll:
-		if len(value.Results.Results) == 0 {
-			return nil, mediaClear, nil, true, mediaNone, nil
-		}
 		counts := map[string]tg.PollAnswerVoters{}
 		for _, result := range value.Results.Results {
 			counts[string(result.Option)] = result
@@ -80,16 +81,12 @@ func (m *mediaMapper) media(id int, msg tg.NotEmptyMessage, raw tg.MessageMediaC
 			if !ok {
 				continue
 			}
-			result, found := counts[string(answer.Option)]
-			count, correct := 0, false
-			if found {
-				count, correct = result.Voters, result.Correct
-			}
+			result := counts[string(answer.Option)]
 			percent := float64(0)
 			if value.Results.TotalVoters > 0 {
-				percent = float64(count) / float64(value.Results.TotalVoters) * 100
+				percent = float64(result.Voters) / float64(value.Results.TotalVoters) * 100
 			}
-			options = append(options, map[string]any{"label": answer.Text.Text, "count": count, "correct": correct, "percent": percent})
+			options = append(options, map[string]any{"label": answer.Text.Text, "count": result.Voters, "correct": result.Correct, "percent": percent})
 		}
 		description, _ := json.Marshal(options)
 		return &archiveMedia{ID: id, Type: "poll", Title: value.Poll.Question.Text, Description: string(description)}, mediaReplace, nil, true, mediaNone, nil
@@ -106,20 +103,41 @@ func (m *mediaMapper) media(id int, msg tg.NotEmptyMessage, raw tg.MessageMediaC
 	if !ok {
 		return nil, mediaClear, nil, true, mediaNone, nil
 	}
-	if !m.cfg.DownloadMedia || !m.allowed(raw) {
-		return nil, mediaKeep, nil, repair, mediaSkipped, nil
-	}
-	if err := os.MkdirAll(m.cfg.MediaDir, 0o755); err != nil {
-		return nil, mediaKeep, nil, false, mediaNone, err
-	}
+
+	key := sourceMediaKey(file.InputFileLoc)
 	ext := filepath.Ext(filepath.Base(file.Name))
 	if ext == "" || len(ext) > 6 {
 		ext = ".file"
 	}
-	name := fmt.Sprintf("%d%s", id, strings.ToLower(ext))
-	path := filepath.Join(m.cfg.MediaDir, name)
-	if !overwrite && fileExists(path) {
-		return mediaRecord(id, raw, file.Name, name), mediaReplace, nil, true, mediaReused, nil
+	name := fmt.Sprintf("%d-%s-%d%s", id, key, file.Size, strings.ToLower(ext))
+	url := filepath.ToSlash(filepath.Join(strconv.FormatInt(m.peerID, 10), name))
+	path := filepath.Join(m.cfg.MediaDir, filepath.FromSlash(url))
+	stored := m.existing[id]
+
+	if m.cfg.DownloadMedia && !m.allowed(raw) {
+		return nil, mediaClear, nil, true, mediaSkipped, nil
+	}
+	if validFile(path, file.Size) {
+		if m.cfg.DownloadMedia {
+			if err := os.Chmod(path, 0o644); err != nil {
+				return nil, mediaKeep, nil, false, mediaNone, err
+			}
+		}
+		return mediaRecord(id, raw, file.Name, url), mediaReplace, nil, true, mediaReused, nil
+	}
+	if !m.cfg.DownloadMedia {
+		if stored.URL == url || legacyMedia(id, key, stored) {
+			return nil, mediaKeep, nil, false, mediaSkipped, nil
+		}
+		return nil, mediaClear, nil, false, mediaSkipped, nil
+	}
+	if adopted, err := m.adoptLegacy(id, key, stored, path, file.Size); err != nil {
+		return nil, mediaKeep, nil, false, mediaNone, err
+	} else if adopted {
+		return mediaRecord(id, raw, file.Name, url), mediaReplace, nil, true, mediaReused, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, mediaKeep, nil, false, mediaNone, err
 	}
 	download := m.download
 	if m.downloadFn != nil {
@@ -127,33 +145,73 @@ func (m *mediaMapper) media(id int, msg tg.NotEmptyMessage, raw tg.MessageMediaC
 	}
 	for attempt := 1; attempt <= 3; attempt++ {
 		err := download(file, path)
+		if err == nil && validFile(path, file.Size) {
+			if err := os.Chmod(path, 0o644); err != nil {
+				return nil, mediaKeep, nil, false, mediaNone, err
+			}
+			return mediaRecord(id, raw, file.Name, url), mediaReplace, nil, true, mediaDownloaded, nil
+		}
 		if err == nil {
-			return mediaRecord(id, raw, file.Name, name), mediaReplace, nil, true, mediaDownloaded, nil
+			err = fmt.Errorf("downloaded size does not match Telegram metadata")
 		}
 		err = fmt.Errorf("peer %d media %d to %s: %w", m.peerID, id, path, err)
 		if fatalMediaError(err) {
 			return nil, mediaKeep, nil, false, mediaNone, err
 		}
 		if attempt == 3 {
-			return nil, mediaKeep, &mediaFailure{Attempts: attempt, Error: err.Error()}, false, mediaFailed, nil
+			return nil, mediaClear, &mediaFailure{Attempts: attempt, Error: err.Error()}, false, mediaFailed, nil
 		}
-		timer := time.NewTimer(time.Duration(attempt) * mediaRetryDelay)
-		select {
-		case <-m.ctx.Done():
-			timer.Stop()
-			return nil, mediaKeep, nil, false, mediaNone, m.ctx.Err()
-		case <-timer.C:
+		if err := waitContext(m.ctx, time.Duration(attempt)*mediaRetryDelay); err != nil {
+			return nil, mediaKeep, nil, false, mediaNone, err
 		}
 	}
 	panic("unreachable")
 }
 
-func mediaRecord(id int, raw tg.MessageMediaClass, original, name string) *archiveMedia {
-	media := &archiveMedia{ID: id, Type: "photo", URL: name, Title: filepath.Base(original)}
+func mediaRecord(id int, raw tg.MessageMediaClass, original, url string) *archiveMedia {
+	media := &archiveMedia{ID: id, Type: "photo", URL: url, Title: filepath.Base(original)}
 	if _, ok := raw.(*tg.MessageMediaPhoto); ok {
-		media.Thumb = name
+		media.Thumb = url
 	}
 	return media
+}
+
+func sourceMediaKey(location tg.InputFileLocationClass) string {
+	switch value := location.(type) {
+	case *tg.InputPhotoFileLocation:
+		return "p" + strconv.FormatInt(value.ID, 10)
+	case *tg.InputDocumentFileLocation:
+		return "d" + strconv.FormatInt(value.ID, 10)
+	}
+	return "unknown"
+}
+
+func validFile(path string, size int64) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular() && info.Size() == size
+}
+
+func storedSourceKey(raw string) string {
+	var message struct {
+		Media struct {
+			Photo struct {
+				ID int64 `json:"id"`
+			} `json:"photo"`
+			Document struct {
+				ID int64 `json:"id"`
+			} `json:"document"`
+		} `json:"media"`
+	}
+	if json.Unmarshal([]byte(raw), &message) != nil {
+		return ""
+	}
+	if message.Media.Photo.ID != 0 {
+		return "p" + strconv.FormatInt(message.Media.Photo.ID, 10)
+	}
+	if message.Media.Document.ID != 0 {
+		return "d" + strconv.FormatInt(message.Media.Document.ID, 10)
+	}
+	return ""
 }
 
 func (m *mediaMapper) allowed(raw tg.MessageMediaClass) bool {
@@ -174,22 +232,117 @@ func (m *mediaMapper) allowed(raw tg.MessageMediaClass) bool {
 	return false
 }
 
+func legacyMedia(id int, key string, stored storedMedia) bool {
+	return stored.URL != "" && !strings.ContainsAny(stored.URL, `/\\`) && strings.HasPrefix(stored.URL, strconv.Itoa(id)+".") && (stored.Source == "" || stored.Source == key)
+}
+
+func (m *mediaMapper) adoptLegacy(id int, key string, stored storedMedia, path string, size int64) (bool, error) {
+	if !legacyMedia(id, key, stored) {
+		return false, nil
+	}
+	legacy := filepath.Join(m.cfg.MediaDir, stored.URL)
+	if !validFile(legacy, size) {
+		return false, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return false, err
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	if err := os.Link(legacy, path); err == nil {
+		if err := os.Chmod(path, 0o644); err != nil {
+			_ = os.Remove(path)
+			return false, err
+		}
+		linked, err := os.Open(path)
+		if err == nil {
+			err = linked.Sync()
+			_ = linked.Close()
+		}
+		if err == nil {
+			err = syncDirectory(filepath.Dir(path))
+		}
+		if err != nil {
+			_ = os.Remove(path)
+			return false, err
+		}
+		return true, nil
+	}
+	source, err := os.Open(legacy)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = source.Close() }()
+	return true, publishFile(path, size, func(target *os.File) error {
+		_, err := io.Copy(target, source)
+		return err
+	})
+}
+
 func (m *mediaMapper) download(file *tmedia.Media, path string) error {
 	if m.pool == nil {
 		m.pool = dcpool.NewPool(m.ext.Client(), m.ext.Config().Pool, mediaMiddlewares(m.ctx, m.takeoutID)...)
 	}
-	tmp := path + ".tmp"
-	_ = os.Remove(tmp)
 	client := m.pool.Client(m.ctx, file.DC)
-	_, err := gotddownloader.NewDownloader().WithPartSize(coredownloader.MaxPartSize).Download(client, file.InputFileLoc).WithThreads(4).ToPath(m.ctx, tmp)
-	if err != nil {
-		_ = os.Remove(tmp)
+	return publishFile(path, file.Size, func(target *os.File) error {
+		_, err := gotddownloader.NewDownloader().WithPartSize(coredownloader.MaxPartSize).Download(client, file.InputFileLoc).WithThreads(4).WithVerify(true).Parallel(m.ctx, target)
+		return err
+	})
+}
+
+func publishFile(path string, size int64, write func(*os.File) error) error {
+	if validFile(path, size) {
+		return os.Chmod(path, 0o644)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	if err = os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return err
 	}
-	return err
+	tmpPath := tmp.Name()
+	defer func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+	}()
+	if err := write(tmp); err != nil {
+		return err
+	}
+	if info, err := tmp.Stat(); err != nil {
+		return err
+	} else if info.Size() != size {
+		return fmt.Errorf("downloaded size does not match Telegram metadata")
+	}
+	if err := tmp.Chmod(0o644); err != nil {
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	return syncDirectory(filepath.Dir(path))
+}
+
+func syncDirectory(path string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	dir, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = dir.Close() }()
+	return dir.Sync()
 }
 
 func mediaMiddlewares(ctx context.Context, takeoutID int64) []telegram.Middleware {
@@ -202,8 +355,9 @@ func mediaMiddlewares(ctx context.Context, takeoutID int64) []telegram.Middlewar
 
 func fatalMediaError(err error) bool {
 	var pathError *os.PathError
+	var linkError *os.LinkError
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
-		errors.As(err, &pathError) || tgerr.IsCode(err, 420)
+		errors.As(err, &pathError) || errors.As(err, &linkError) || tgerr.IsCode(err, 420)
 }
 
 func stickerText(raw tg.MessageMediaClass) string {
@@ -221,9 +375,4 @@ func stickerText(raw tg.MessageMediaClass) string {
 		}
 	}
 	return ""
-}
-
-func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
 }

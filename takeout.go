@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/expr-lang/expr/vm"
 	"github.com/gotd/td/bin"
@@ -117,7 +118,9 @@ func (s *synchronizer) runTakeout(ctx context.Context, sel selection, p peers.Pe
 
 	finish := &tg.AccountFinishTakeoutSessionRequest{}
 	finish.SetSuccess(runErr == nil)
-	if _, err := s.api.AccountFinishTakeoutSession(context.WithoutCancel(ctx), finish); err != nil {
+	finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	if _, err := s.api.AccountFinishTakeoutSession(finishCtx, finish); err != nil {
 		runErr = errors.Join(runErr, fmt.Errorf("finish takeout session: %w", err))
 	}
 	if runErr != nil {

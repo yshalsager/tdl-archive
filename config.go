@@ -17,7 +17,6 @@ type config struct {
 	FetchWait      int      `yaml:"fetch_wait"`
 	FetchLimit     int      `yaml:"fetch_limit"`
 	UseTakeout     bool     `yaml:"use_takeout"`
-	JSONDump       bool     `yaml:"json_dump"`
 }
 
 func loadConfig(path string) (config, error) {

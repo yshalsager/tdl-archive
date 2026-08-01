@@ -17,12 +17,13 @@ type peerResult struct {
 }
 
 type mediaStats struct {
-	Downloaded int   `json:"downloaded"`
-	Reused     int   `json:"reused"`
-	Skipped    int   `json:"skipped"`
-	Failed     int   `json:"failed"`
-	Pending    int   `json:"pending"`
-	FailedIDs  []int `json:"failed_ids,omitempty"`
+	Downloaded  int   `json:"downloaded"`
+	Reused      int   `json:"reused"`
+	Skipped     int   `json:"skipped"`
+	Failed      int   `json:"failed"`
+	Pending     int   `json:"pending"`
+	Unavailable int   `json:"unavailable"`
+	FailedIDs   []int `json:"failed_ids,omitempty"`
 }
 
 type syncResult struct {
@@ -30,6 +31,8 @@ type syncResult struct {
 	EndingCursor   *int
 	Selected       int
 	Saved          int
+	Reconciled     int
+	Missing        int
 	Media          mediaStats
 	Warnings       []string
 }
@@ -46,6 +49,8 @@ type runResult struct {
 	DialogTopMessageID *int        `json:"dialog_top_message_id,omitempty"`
 	Selected           int         `json:"selected"`
 	Saved              int         `json:"saved"`
+	Reconciled         int         `json:"reconciled"`
+	Missing            int         `json:"missing"`
 	Media              mediaStats  `json:"media"`
 	JSONDump           bool        `json:"json_dump"`
 	DurationMS         int64       `json:"duration_ms"`
