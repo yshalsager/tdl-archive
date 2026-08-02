@@ -34,7 +34,33 @@ func (s *synchronizer) collect(ctx context.Context, inputPeer tg.InputPeerClass,
 	}
 	result := []qmessages.Elem{}
 	seen := cursor
+	foundIDs := map[int]bool{}
 	for _, messageRange := range s.ranges {
+		api := tg.NewClient(messageRangeInvoker{raw: s.takeout, messageRange: messageRange})
+		if len(sel.IDs) > 0 {
+			ids := []int{}
+			for _, id := range sel.IDs {
+				if id >= messageRange.MinID && id <= messageRange.MaxID {
+					ids = append(ids, id)
+				}
+			}
+			if len(ids) == 0 {
+				continue
+			}
+			elems, missing, err := s.collectIDs(ctx, api, inputPeer, ids, program)
+			if err != nil {
+				return nil, seen, err
+			}
+			missingSet := map[int]bool{}
+			for _, id := range missing {
+				missingSet[id] = true
+			}
+			for _, id := range ids {
+				foundIDs[id] = foundIDs[id] || !missingSet[id]
+			}
+			result = append(result, elems...)
+			continue
+		}
 		remaining := limit
 		if limit > 0 {
 			remaining -= len(result)
@@ -42,7 +68,6 @@ func (s *synchronizer) collect(ctx context.Context, inputPeer tg.InputPeerClass,
 				break
 			}
 		}
-		api := tg.NewClient(messageRangeInvoker{raw: s.takeout, messageRange: messageRange})
 		elems, next, err := s.collectFrom(ctx, api, inputPeer, sel, cursor, program, remaining)
 		if err != nil {
 			return nil, seen, err
@@ -51,6 +76,17 @@ func (s *synchronizer) collect(ctx context.Context, inputPeer tg.InputPeerClass,
 		seen = max(seen, next)
 	}
 	result = uniqueElements(result)
+	if len(sel.IDs) > 0 {
+		missing := []int{}
+		for _, id := range sel.IDs {
+			if !foundIDs[id] {
+				missing = append(missing, id)
+			}
+		}
+		if len(missing) > 0 {
+			return nil, seen, fmt.Errorf("messages unavailable or outside the selected peer: %v", missing)
+		}
+	}
 	if sel.Type == "last" && len(result) > sel.Input[0] {
 		result = result[len(result)-sel.Input[0]:]
 	}

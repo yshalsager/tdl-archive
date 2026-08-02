@@ -311,6 +311,26 @@ INSERT INTO archive_peer_cache(id,peer_selector,peer_title,peer_access_hash,peer
 	if len(unique) != 2 || unique[0].Msg.GetID() != 1 || unique[1].Msg.GetID() != 2 {
 		t.Fatalf("takeout range deduplication: %v", unique)
 	}
+	takeoutCalls := 0
+	takeoutInvoker := telegram.InvokeFunc(func(_ context.Context, input bin.Encoder, output bin.Decoder) error {
+		wrapped := input.(*tg.InvokeWithMessagesRangeRequest)
+		request := wrapped.Query.(*tg.ChannelsGetMessagesRequest)
+		response := &tg.MessagesMessages{Chats: []tg.ChatClass{&tg.Channel{ID: 1, AccessHash: 1}}}
+		for _, inputID := range request.ID {
+			id := inputID.(*tg.InputMessageID).ID
+			if id >= wrapped.Range.MinID && id <= wrapped.Range.MaxID {
+				response.Messages = append(response.Messages, &tg.Message{ID: id, PeerID: &tg.PeerChannel{ChannelID: 1}})
+			}
+		}
+		output.(*tg.MessagesMessagesBox).Messages = response
+		takeoutCalls++
+		return nil
+	})
+	takeoutSyncer := synchronizer{takeout: takeoutInvoker, ranges: []tg.MessageRange{{MinID: 1, MaxID: 50}, {MinID: 51, MaxID: 100}}}
+	collected, _, err = takeoutSyncer.collect(context.Background(), &tg.InputPeerChannel{ChannelID: 1, AccessHash: 1}, selection{IDs: intList{10, 90}}, 0, nil, 0)
+	if err != nil || takeoutCalls != 2 || len(collected) != 2 || collected[0].Msg.GetID() != 10 || collected[1].Msg.GetID() != 90 {
+		t.Fatalf("takeout exact IDs: ids=%v calls=%d err=%v", collected, takeoutCalls, err)
+	}
 	migration, _, err := baseMessage(&tg.MessageService{ID: 2, Date: 1, PeerID: &tg.PeerChat{ChatID: 1}, Action: &tg.MessageActionChatMigrateTo{ChannelID: 10}}, peer.Entities{})
 	if err != nil || migration.Type != "migrated_to" || migration.MigrationTo != -1000000000010 || migration.Content != "-1000000000010" {
 		t.Fatalf("migration message=%+v err=%v", migration, err)
