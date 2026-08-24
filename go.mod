@@ -9,7 +9,7 @@ require (
 	github.com/iyear/tdl/core v0.20.3
 	github.com/iyear/tdl/extension v0.20.3
 	go.yaml.in/yaml/v3 v3.0.5
-	modernc.org/sqlite v1.56.0
+	modernc.org/sqlite v1.57.0
 )
 
 require (
