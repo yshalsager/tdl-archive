@@ -51,8 +51,8 @@ github.com/hashicorp/golang-lru/v2 v2.0.7 h1:a+bsQ5rvGLjzHuww6tVxozPZFVghXaHOwFs
 github.com/hashicorp/golang-lru/v2 v2.0.7/go.mod h1:QeFd9opnmA6QUJc5vARoKUSoFhyfM2/ZepoAG6RGpeM=
 github.com/iyear/connectproxy v0.1.1 h1:JZOF/62vvwRGBWcgSyWRb0BpKD4FSs0++B5/y5pNE4c=
 github.com/iyear/connectproxy v0.1.1/go.mod h1:yD4zOmSMQCmwHIT4fk8mg4k2M15z8VoMSoeY6NNJdsA=
-github.com/iyear/tdl v0.20.3 h1:4mXcCla1KRoWkhnscc3hoY4f4OLK+xHR5vv49LPZYqU=
-github.com/iyear/tdl v0.20.3/go.mod h1:2vTVGkP0nELcHTddh6Annt6VHBuIAVhAY0wMrKnyCQI=
+github.com/iyear/tdl v0.20.4 h1:RskNEjILgwbyiCaqKYvMmwVH1/E4Mh6l1oP9zd9y5po=
+github.com/iyear/tdl v0.20.4/go.mod h1:x7OBFkDHiKIORilIvh09JR+yhyRmV9QofYRB3/2xrSg=
 github.com/iyear/tdl/core v0.20.4 h1:3CuYn56XRdSvyZwJq9hi4Oi4nGyItIR0WiURdeZwsA0=
 github.com/iyear/tdl/core v0.20.4/go.mod h1:8CdaYmd2ZOCzoUdXMW0cATfnAwA9RFtNNXZDwF+odMU=
 github.com/iyear/tdl/extension v0.20.4 h1:h3A6cykmrdvnNCFXu3LtlwBLcIZKNiyYDPJgEO8nMjk=

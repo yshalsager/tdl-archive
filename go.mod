@@ -5,7 +5,7 @@ go 1.25.8
 require (
 	github.com/expr-lang/expr v1.17.8
 	github.com/gotd/td v0.145.1
-	github.com/iyear/tdl v0.20.3
+	github.com/iyear/tdl v0.20.4
 	github.com/iyear/tdl/core v0.20.4
 	github.com/iyear/tdl/extension v0.20.4
 	go.yaml.in/yaml/v3 v3.0.5
