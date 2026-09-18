@@ -9,7 +9,7 @@ require (
 	github.com/iyear/tdl/core v0.20.4
 	github.com/iyear/tdl/extension v0.20.4
 	go.yaml.in/yaml/v3 v3.0.5
-	modernc.org/sqlite v1.58.0
+	modernc.org/sqlite v1.59.0
 )
 
 require (
@@ -55,7 +55,7 @@ require (
 	golang.org/x/tools v0.48.0 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
-	modernc.org/libc v1.75.6 // indirect
+	modernc.org/libc v1.75.7 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.12.1 // indirect
 	rsc.io/qr v0.2.0 // indirect
