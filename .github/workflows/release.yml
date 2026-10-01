@@ -22,7 +22,7 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ github.event.inputs.tag || github.ref }}
-      - uses: jdx/mise-action@v4.3.0
+      - uses: jdx/mise-action@v5.0.0
       - run: goreleaser release --clean
         env:
           GOMAXPROCS: ''
