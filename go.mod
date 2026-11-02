@@ -8,7 +8,7 @@ require (
 	github.com/iyear/tdl v0.20.4
 	github.com/iyear/tdl/core v0.20.4
 	github.com/iyear/tdl/extension v0.20.4
-	go.yaml.in/yaml/v3 v3.0.5
+	go.yaml.in/yaml/v3 v3.0.6
 	modernc.org/sqlite v1.59.0
 )
 
