@@ -3,7 +3,7 @@ module github.com/yshalsager/tdl-archive
 go 1.25.8
 
 require (
-	github.com/expr-lang/expr v1.17.8
+	github.com/expr-lang/expr v1.18.1
 	github.com/gotd/td v0.145.1
 	github.com/iyear/tdl v0.20.4
 	github.com/iyear/tdl/core v0.20.4
